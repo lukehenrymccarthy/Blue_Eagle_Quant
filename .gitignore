@@ -1,0 +1,25 @@
+# Environment & secrets
+.env
+.env.*
+
+# Large raw data files — regenerate via ingestion scripts
+data/fundamentals/
+data/prices/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

@@ -1,0 +1,17 @@
+{
+  "weights": {
+    "momentum_18m":   0.10,
+    "fund_quality":   0.30,
+    "sector_rs_3m":   0.30,
+    "analyst_rev_3m": 0.30
+  },
+  "in_sample_sharpe": null,
+  "oos_sharpe": null,
+  "equal_oos_sharpe": null,
+  "basket": 50,
+  "hold_months": 1,
+  "split_date": null,
+  "constraints": {
+    "note": "Default weights. Run backtest/optimize_weights.py to calibrate. Macro (HY spread) removed from composite — now a regime overlay on invested fraction."
+  }
+}

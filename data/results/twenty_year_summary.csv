@@ -1,0 +1,4 @@
+label,ann_return,ann_vol,sharpe,max_drawdown,calmar,hit_rate,t_stat,total_return,n_periods
+ML-Optimised Weights,11.71,18.91,0.33,-56.26,0.208,59.8,2.63,535.5,239
+Equal-Weight,8.37,21.43,0.148,-56.54,0.148,56.9,1.68,213.3,239
+SPY Buy-and-Hold,11.7,15.21,0.409,-50.78,0.23,64.4,3.26,620.3,239

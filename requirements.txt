@@ -1,0 +1,12 @@
+massive
+yfinance       # ETF price data for sector backtest
+scipy          # IC t-stats in analysis/macro_ic.py
+wrds           # still needed for wrds_returns.py
+pandas
+numpy
+pandas-datareader
+fredapi
+python-dotenv
+pyarrow        # fast parquet storage
+tqdm           # progress bars on bulk pulls
+matplotlib     # equity curve plots in results.py
