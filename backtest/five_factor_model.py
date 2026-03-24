@@ -31,10 +31,13 @@ SECTOR_ETFS = ["XLC", "XLY", "XLP", "XLE", "XLF",
 
 FACTOR_WEIGHTS = {
     "momentum_12m":   0.10,
-    "fund_quality":   0.30,
-    "sector_rs_3m":   0.30,
-    "analyst_rev_3m": 0.30,
+    "fund_quality":   0.25,
+    "sector_rs_3m":   0.25,
+    "analyst_rev_3m": 0.25,
+    "oil_beta_tilt":  0.15,
 }
+
+OIL_BETA_WINDOW = 36   # months for rolling OLS beta vs WTI
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA LOADING — each function returns a pre-built panel or Series
@@ -206,11 +209,101 @@ def build_macro_factor(ret_wide: pd.DataFrame) -> pd.Series | None:
     macro_z   = -((s - roll_mean) / roll_std)
     return macro_z.reindex(ret_wide.index, method="ffill")
 
+def build_oil_beta_panel(ret_wide: pd.DataFrame, sic_map: pd.Series) -> pd.DataFrame:
+    """
+    Oil price sensitivity tilt — (date × permno) cross-sectional panel.
+
+    At each rebalance date t:
+        oil_tilt[stock] = rolling_beta[sector(stock), t]  ×  oil_regime_z[t]
+
+    Where:
+        rolling_beta  = 36-month OLS slope of sector_ETF_ret on WTI_ret
+                        (cov(ETF, oil) / var(oil), recalculated each month)
+        oil_regime_z  = rolling z-score of the 3-month WTI cumulative return,
+                        standardised over a trailing 36-month window
+
+    Effect:
+        - Energy (XLE)         β ≈ +0.4 → high positive score when oil rising
+        - Airlines/Trucking    β ≈ −0.2 → negative score when oil rising
+        - Tech / Financials    β ≈  0.0 → near-zero score (oil-neutral)
+
+    The panel is cross-sectionally z-scored before entering the composite,
+    so it only changes *relative* rankings — it never tilts all stocks equally.
+    """
+    if sic_map.empty:
+        return pd.DataFrame()
+
+    print("  Downloading WTI crude oil + sector ETF prices (yfinance)...")
+    raw = yf.download(
+        SECTOR_ETFS + ["CL=F"],
+        start="2007-01-01", end="2025-06-01",
+        interval="1mo", auto_adjust=True, progress=False,
+    )["Close"]
+    raw.index = pd.to_datetime(raw.index) + pd.offsets.MonthEnd(0)
+    raw = raw.sort_index()
+
+    if "CL=F" not in raw.columns:
+        print("  [SKIP] WTI crude oil data unavailable from yfinance")
+        return pd.DataFrame()
+
+    monthly_ret = raw.pct_change()
+    oil_ret     = monthly_ret["CL=F"].dropna()
+
+    # ── Oil regime: rolling z-score of 3M cumulative WTI return ──────────────
+    oil_3m     = (1 + oil_ret.fillna(0)).rolling(3).apply(np.prod, raw=True) - 1
+    roll_mean  = oil_3m.rolling(36, min_periods=12).mean()
+    roll_std   = oil_3m.rolling(36, min_periods=12).std().replace(0, np.nan)
+    oil_regime = ((oil_3m - roll_mean) / roll_std).reindex(ret_wide.index, method="ffill")
+
+    # ── Rolling OLS beta: cov(sector_ret, oil_ret) / var(oil_ret) ─────────────
+    # Computed separately per sector ETF over a trailing OIL_BETA_WINDOW window.
+    etf_betas = {}
+    for etf in SECTOR_ETFS:
+        if etf not in monthly_ret.columns:
+            continue
+        etf_ret    = monthly_ret[etf]
+        common     = oil_ret.index.intersection(etf_ret.index)
+        a_etf      = etf_ret.reindex(common)
+        a_oil      = oil_ret.reindex(common)
+        roll_cov   = a_etf.rolling(OIL_BETA_WINDOW, min_periods=12).cov(a_oil)
+        roll_var   = a_oil.rolling(OIL_BETA_WINDOW, min_periods=12).var().replace(0, np.nan)
+        etf_betas[etf] = (roll_cov / roll_var)
+
+    if not etf_betas:
+        return pd.DataFrame()
+
+    beta_df = pd.DataFrame(etf_betas).reindex(ret_wide.index, method="ffill")
+
+    # ── Oil tilt: beta × regime (stock inherits its sector's beta) ────────────
+    # Shape: (n_dates × n_etfs) — each cell is the tilt score for that sector
+    oil_tilt_etf = beta_df.multiply(oil_regime, axis=0)
+
+    # ── Broadcast to permno level via sic_map ─────────────────────────────────
+    stock_to_etf = sic_map.reindex(ret_wide.columns).dropna()
+    etf_to_idx   = {e: i for i, e in enumerate(oil_tilt_etf.columns)}
+    matched      = [(s, e) for s, e in stock_to_etf.items() if e in etf_to_idx]
+    if not matched:
+        return pd.DataFrame()
+
+    stocks_out  = [s for s, _ in matched]
+    etf_idxs    = [etf_to_idx[e] for _, e in matched]
+    tilt_matrix = oil_tilt_etf.values          # (n_dates, n_etfs)
+
+    oil_panel = pd.DataFrame(
+        tilt_matrix[:, etf_idxs],
+        index   = oil_tilt_etf.index,
+        columns = stocks_out,
+    )
+    oil_panel.columns = oil_panel.columns.astype(ret_wide.columns.dtype)
+    return oil_panel
+
+
 def build_all_factor_panels(
-    ret_wide:         pd.DataFrame,
-    fund_quality:     pd.DataFrame,
-    sector_rs:        pd.DataFrame,
-    analyst_rev:      pd.DataFrame,
+    ret_wide:     pd.DataFrame,
+    fund_quality: pd.DataFrame,
+    sector_rs:    pd.DataFrame,
+    analyst_rev:  pd.DataFrame,
+    oil_beta:     pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
     panels = {}
 
@@ -236,6 +329,12 @@ def build_all_factor_panels(
         panels["analyst_rev_3m"] = analyst_rev
     else:
         print("  F4  Analyst Rec Revision 3m  — [SKIP]")
+
+    if not oil_beta.empty:
+        print(f"  F5  Oil Beta Tilt            — {oil_beta.shape[1]:,} stocks mapped")
+        panels["oil_beta_tilt"] = oil_beta
+    else:
+        print("  F5  Oil Beta Tilt            — [SKIP]")
 
     return panels
 
@@ -430,10 +529,19 @@ def main():
         except Exception as e:
             print(f"  [SKIP] Macro error: {e}")
 
+    oil_beta = pd.DataFrame()
+    try:
+        print("\n  Building oil beta tilt panel...")
+        oil_beta = build_oil_beta_panel(ret_wide, sic_map)
+        if not oil_beta.empty:
+            print(f"  Oil Beta      : {oil_beta.shape[1]:,} stocks × {oil_beta.shape[0]} months")
+    except Exception as e:
+        print(f"  [SKIP] Oil beta error: {e}")
+
     print("\n" + "═" * 70)
     print("  Building factor panels")
     print("═" * 70 + "\n")
-    panels = build_all_factor_panels(ret_wide, fund_panel, sector_rs, analyst_rev)
+    panels = build_all_factor_panels(ret_wide, fund_panel, sector_rs, analyst_rev, oil_beta)
     active_factors = list(panels.keys())
     
     opt_weights = load_optimal_weights()
