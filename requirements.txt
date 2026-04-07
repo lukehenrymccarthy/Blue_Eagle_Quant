@@ -1,12 +1,26 @@
-massive
-yfinance       # ETF price data for sector backtest
-scipy          # IC t-stats in analysis/macro_ic.py
-wrds           # still needed for wrds_returns.py
+# Core data
 pandas
 numpy
+pyarrow          # fast parquet I/O
+scipy            # IC t-stats
+
+# Dashboard
+nicegui>=1.4     # web UI framework
+
+# Data sources
+yfinance         # ETF + stock price data (free)
+fredapi          # FRED macro series
+massive          # Polygon/Massive daily prices
+wrds             # CRSP / Compustat / IBES (institutional)
+requests         # SSGA ETF holdings download
+
+# ML / analysis
+scikit-learn
+xgboost
+
+# Utilities
+python-dotenv    # load .env credentials
 pandas-datareader
-fredapi
-python-dotenv
-pyarrow        # fast parquet storage
-tqdm           # progress bars on bulk pulls
-matplotlib     # equity curve plots in results.py
+tqdm             # progress bars
+duckdb           # embedded analytics warehouse
+matplotlib       # equity curve plots

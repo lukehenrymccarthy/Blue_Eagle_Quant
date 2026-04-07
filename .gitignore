@@ -1,6 +1,7 @@
-# Environment & secrets
+# Environment & secrets — .env.example is safe to commit (no real keys)
 .env
-.env.*
+.env.local
+.env.*.local
 
 # Large raw data files — regenerate via ingestion scripts
 data/fundamentals/

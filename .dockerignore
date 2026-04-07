@@ -1,0 +1,26 @@
+# Secrets — never bake into image
+.env
+.env.*
+
+# Data — bind-mounted at runtime
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Dev tools
+.git/
+.gitignore
+.DS_Store
+.idea/
+.vscode/
+*.ipynb
+.ipynb_checkpoints/
+
+# Docs / misc
+*.md

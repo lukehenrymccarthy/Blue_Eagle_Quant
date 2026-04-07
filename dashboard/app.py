@@ -13,14 +13,19 @@ Run:
 """
 
 import sys
+import os
 import pandas as pd
 import numpy as np
 import yfinance as yf
 from pathlib import Path
 from nicegui import ui
+from dotenv import load_dotenv
+
+load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backtest.five_factor_model import _sic_to_etf
+from sectorscope.cache import daily_cache
 
 # ── Sector / ETF metadata ─────────────────────────────────────────────────────
 SECTOR_META = {
@@ -167,6 +172,7 @@ def macro_status() -> tuple[str, str, str]:
 
 # ── Price history for stock popup ─────────────────────────────────────────────
 
+@daily_cache("price_history")
 def fetch_price_history(ticker: str, days: int = 365) -> list[list]:
     p = Path(f"data/prices/{ticker}.parquet")
     try:
@@ -1534,6 +1540,7 @@ _MODEL_SELECTED = {
 }
 
 
+@daily_cache("f1_spy_proximity")
 def _f1_load() -> tuple[list, float]:
     """52-week high proximity: SPY as market-level proxy (yfinance)."""
     try:
@@ -1587,6 +1594,7 @@ def _f2_load() -> tuple[list, float]:
         return [], float("nan")
 
 
+@daily_cache("f3_sector_rs")
 def _f3_load() -> tuple[dict, list]:
     """Sector RS 1m: current RS per sector + equal-weight avg time series."""
     try:
@@ -2191,7 +2199,8 @@ def factors_page():
 # ══════════════════════════════════════════════════════════════════════════════
 ui.run(
     title   = "Blue Eagle Capital — Five-Factor Model",
-    port    = 8080,
+    host    = os.getenv("HOST", "127.0.0.1"),
+    port    = int(os.getenv("PORT", "8080")),
     reload  = False,
     favicon = "📊",
 )

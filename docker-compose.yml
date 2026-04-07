@@ -1,0 +1,50 @@
+version: "3.9"
+
+# ── SectorScope self-hosted stack ────────────────────────────────────────────
+#
+# Services:
+#   dashboard  — NiceGUI web app (always on, port 8080)
+#   refresher  — Daily data pipeline (runs once then exits)
+#
+# Usage:
+#   docker compose up -d dashboard          # start the web app
+#   docker compose run --rm refresher       # run a manual refresh
+#   docker compose up --build               # rebuild + start everything
+#
+# The data/ directory is bind-mounted so both containers share the same
+# parquet / CSV files and the dashboard picks up fresh data automatically.
+#
+# Add a host cron entry to trigger the refresher daily:
+#   0 6 * * * docker compose -f /path/to/docker-compose.yml run --rm refresher
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  dashboard:
+    build: .
+    container_name: sectorscope_dashboard
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    env_file: .env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+    volumes:
+      - ./data:/app/data          # live data shared with host
+      - ./data/cache:/app/data/cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  refresher:
+    build: .
+    container_name: sectorscope_refresher
+    restart: "no"                 # run-and-exit; triggered by external cron
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    command: ["python", "scripts/daily_refresh.py"]

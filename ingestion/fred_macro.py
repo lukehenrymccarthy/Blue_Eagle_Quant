@@ -123,7 +123,24 @@ def compute_macro_signals(df: pd.DataFrame) -> pd.DataFrame:
     return signals.sort_index()
 
 
-def run(start: str = "2000-01-01"):
+def is_fresh(max_age_hours: float = 20) -> bool:
+    """Return True if both output files exist and were written within max_age_hours."""
+    import time
+    for p in [OUTPUT_DIR / "fred_raw.parquet", OUTPUT_DIR / "fred_signals.parquet"]:
+        if not p.exists():
+            return False
+        age_h = (time.time() - p.stat().st_mtime) / 3600
+        if age_h > max_age_hours:
+            return False
+    return True
+
+
+def run(start: str = "2000-01-01", force: bool = False):
+    if not force and is_fresh():
+        print("FRED data is already fresh (< 20 h old). Skipping pull. Use force=True to override.")
+        return pd.read_parquet(OUTPUT_DIR / "fred_raw.parquet"), \
+               pd.read_parquet(OUTPUT_DIR / "fred_signals.parquet")
+
     print("Pulling FRED macro series...")
     raw     = pull_all_series(start)
     signals = compute_macro_signals(raw)
