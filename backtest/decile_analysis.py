@@ -19,6 +19,7 @@ import sys
 import warnings
 import numpy as np
 import pandas as pd
+import yfinance as yf
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
@@ -35,6 +36,8 @@ from backtest.five_factor_model import (
     FACTOR_WEIGHTS,
 )
 from sectorscope.utils import zscore as _zscore
+
+SECTOR_ETFS = ["XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
 
 RESULTS_DIR = Path("data/results")
 LOAD_START  = "2007-01-01"
@@ -298,6 +301,53 @@ def print_decile_table(is_stats: pd.DataFrame, oos_stats: pd.DataFrame,
     lines.append("  " + "─" * 50)
 
 
+def fetch_benchmark_monthly(start: str, end: str) -> pd.DataFrame:
+    """
+    Download SPY and equal-weight sector ETF monthly total returns.
+
+    Returns DataFrame indexed by month-end date with columns:
+        SPY, EW-Sector
+    """
+    tickers = ["SPY"] + SECTOR_ETFS
+    raw = yf.download(tickers, start=start, end=end, auto_adjust=True,
+                      progress=False)["Close"]
+    # Resample to month-end
+    monthly = raw.resample("ME").last()
+    rets = monthly.pct_change().dropna(how="all")
+
+    bm = pd.DataFrame(index=rets.index)
+    bm["SPY"] = rets["SPY"]
+    # Equal-weight across available sector ETFs each month
+    sector_cols = [c for c in SECTOR_ETFS if c in rets.columns]
+    bm["EW-Sector"] = rets[sector_cols].mean(axis=1)
+    return bm.dropna(how="all")
+
+
+def compute_benchmark_stats(monthly_bm: pd.DataFrame) -> pd.DataFrame:
+    """Annualised stats for SPY and EW-Sector benchmarks."""
+    rows = []
+    rf_monthly = (1 + RISK_FREE_ANN) ** (1 / 12) - 1
+    for col in monthly_bm.columns:
+        r = monthly_bm[col].dropna()
+        mu  = r.mean()
+        std = r.std()
+        ann_ret = (1 + mu) ** 12 - 1
+        ann_vol = std * np.sqrt(12)
+        sharpe  = (mu - rf_monthly) / std * np.sqrt(12) if std > 0 else np.nan
+        max_dd  = float(((1 + r).cumprod() / (1 + r).cumprod().cummax() - 1).min())
+        hit     = (r > 0).mean()
+        rows.append({
+            "label":        col,
+            "ann_return":   round(ann_ret * 100, 2),
+            "ann_vol":      round(ann_vol * 100, 2),
+            "sharpe":       round(sharpe, 3),
+            "max_drawdown": round(max_dd * 100, 2),
+            "hit_rate":     round(hit * 100, 1),
+            "n":            len(r),
+        })
+    return pd.DataFrame(rows).set_index("label")
+
+
 def main():
     print("\n" + "═" * 70)
     print("  DECILE ANALYSIS  —  Loading data")
@@ -382,6 +432,22 @@ def main():
     report = "\n".join(lines)
     print("\n" + report)
 
+    # ── Benchmarks (SPY + EW-Sector) ──────────────────────────────────────────
+    print("\n  Fetching benchmark returns (SPY + sector ETFs)...")
+    try:
+        bm_is  = fetch_benchmark_monthly(IS_START,  IS_END)
+        bm_oos = fetch_benchmark_monthly(OOS_START, OOS_END)
+        # Align to backtest dates
+        bm_is  = bm_is.reindex(is_monthly.index)
+        bm_oos = bm_oos.reindex(oos_monthly.index) if not oos_monthly.empty else bm_oos.iloc[0:0]
+        bm_stats_is  = compute_benchmark_stats(bm_is.dropna(how="all"))
+        bm_stats_oos = compute_benchmark_stats(bm_oos.dropna(how="all")) if not bm_oos.empty else pd.DataFrame()
+        print(f"  Benchmarks IS: {len(bm_is)} periods  |  OOS: {len(bm_oos)} periods")
+    except Exception as e:
+        print(f"  [WARN] Benchmark fetch failed: {e}")
+        bm_stats_is  = pd.DataFrame()
+        bm_stats_oos = pd.DataFrame()
+
     # ── Save ──────────────────────────────────────────────────────────────────
     report_path = RESULTS_DIR / "decile_report.txt"
     report_path.write_text(report)
@@ -390,11 +456,17 @@ def main():
     oos_monthly.to_csv(RESULTS_DIR / "decile_monthly_oos.csv")
     is_stats.to_csv(RESULTS_DIR  / "decile_stats_is.csv")
     oos_stats.to_csv(RESULTS_DIR / "decile_stats_oos.csv")
+    if not bm_stats_is.empty:
+        bm_stats_is.to_csv(RESULTS_DIR  / "benchmark_stats_is.csv")
+    if not bm_stats_oos.empty:
+        bm_stats_oos.to_csv(RESULTS_DIR / "benchmark_stats_oos.csv")
 
     print(f"\n  Saved → {report_path}")
     print(f"  Saved → data/results/decile_monthly_is.csv")
     print(f"  Saved → data/results/decile_monthly_oos.csv")
     print(f"  Saved → data/results/decile_stats_is.csv / oos.csv")
+    if not bm_stats_is.empty:
+        print(f"  Saved → data/results/benchmark_stats_is.csv / oos.csv")
 
 
 if __name__ == "__main__":

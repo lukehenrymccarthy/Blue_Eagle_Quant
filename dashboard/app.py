@@ -1482,12 +1482,14 @@ def _bm_is_oos() -> tuple[pd.DataFrame, pd.DataFrame]:
     return is_df, oos_df
 
 
-def _bm_deciles() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load IS decile stats, OOS decile stats, and IS monthly returns by decile."""
+def _bm_deciles() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load IS/OOS decile stats, IS monthly returns, and IS/OOS benchmark stats."""
     is_stats  = pd.read_csv("data/results/decile_stats_is.csv")   if Path("data/results/decile_stats_is.csv").exists()   else pd.DataFrame()
     oos_stats = pd.read_csv("data/results/decile_stats_oos.csv")  if Path("data/results/decile_stats_oos.csv").exists()  else pd.DataFrame()
     monthly   = pd.read_csv("data/results/decile_monthly_is.csv", index_col=0, parse_dates=True) if Path("data/results/decile_monthly_is.csv").exists() else pd.DataFrame()
-    return is_stats, oos_stats, monthly
+    bm_is     = pd.read_csv("data/results/benchmark_stats_is.csv",  index_col=0) if Path("data/results/benchmark_stats_is.csv").exists()  else pd.DataFrame()
+    bm_oos    = pd.read_csv("data/results/benchmark_stats_oos.csv", index_col=0) if Path("data/results/benchmark_stats_oos.csv").exists() else pd.DataFrame()
+    return is_stats, oos_stats, monthly, bm_is, bm_oos
 
 
 def _bm_macro_comparison() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1670,7 +1672,7 @@ def factors_page():
     is_curves               = _bm_equity_curves()
     macro_is, macro_oos     = _bm_macro_comparison()
     macro_proof             = _bm_macro_proof()
-    is_deciles, oos_deciles, decile_monthly = _bm_deciles()
+    is_deciles, oos_deciles, decile_monthly, bm_is, bm_oos = _bm_deciles()
 
     # ── CSS constants (always end with ; so appending extra props is safe) ────
     HS = ("padding:8px 14px;font-size:11px;font-weight:700;color:#374151;"
@@ -2224,6 +2226,39 @@ def factors_page():
                         + spread_oos_html
                         + '</tr>'
                     )
+
+                # Benchmark rows (SPY, EW-Sector)
+                if not bm_is.empty:
+                    BM_LABELS = {"SPY": "S&P 500 (SPY)", "EW-Sector": "EW Sector ETFs"}
+                    body_html += (
+                        f'<tr><td colspan="10" style="padding:4px 8px;font-size:10px;'
+                        f'font-weight:700;color:#6b7280;letter-spacing:.05em;'
+                        f'border-top:2px solid #e5e7eb;background:#f9fafb;">'
+                        f'BENCHMARKS</td></tr>'
+                    )
+                    for lbl, brow in bm_is.iterrows():
+                        orow = bm_oos.loc[lbl] if (not bm_oos.empty and lbl in bm_oos.index) else None
+                        bm_label = BM_LABELS.get(str(lbl), str(lbl))
+                        bm_cs = "background:#f9fafb;"
+                        row = (
+                            f'<td style="{CS}{bm_cs}text-align:left;color:#6b7280;font-style:italic;">'
+                            f'{bm_label}</td>'
+                            + td_val(brow["ann_return"],  "%", 1, extra=bm_cs)
+                            + td_val(brow["ann_vol"],     "%", 1, color=False, extra=bm_cs)
+                            + td_val(brow["sharpe"],       "", 3, extra=bm_cs)
+                            + td_val(brow["max_drawdown"], "%", 1, extra=bm_cs)
+                            + td_val(brow["hit_rate"],     "%", 1, color=False, extra=bm_cs)
+                        )
+                        if orow is None:
+                            row += f'<td colspan="4" style="{CS}{bm_cs}color:#9ca3af;">—</td>'
+                        else:
+                            row += (
+                                td_val(orow["ann_return"],  "%", 1, extra=f"{sep}{bm_cs}")
+                                + td_val(orow["sharpe"],       "", 3, extra=bm_cs)
+                                + td_val(orow["max_drawdown"], "%", 1, extra=bm_cs)
+                                + td_val(orow["hit_rate"],     "%", 1, color=False, extra=bm_cs)
+                            )
+                        body_html += f"<tr>{row}</tr>"
 
                 with ui.element("div").classes("px-5 pb-2"):
                     ui.html(
