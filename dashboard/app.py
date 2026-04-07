@@ -1482,6 +1482,14 @@ def _bm_is_oos() -> tuple[pd.DataFrame, pd.DataFrame]:
     return is_df, oos_df
 
 
+def _bm_deciles() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load IS decile stats, OOS decile stats, and IS monthly returns by decile."""
+    is_stats  = pd.read_csv("data/results/decile_stats_is.csv")   if Path("data/results/decile_stats_is.csv").exists()   else pd.DataFrame()
+    oos_stats = pd.read_csv("data/results/decile_stats_oos.csv")  if Path("data/results/decile_stats_oos.csv").exists()  else pd.DataFrame()
+    monthly   = pd.read_csv("data/results/decile_monthly_is.csv", index_col=0, parse_dates=True) if Path("data/results/decile_monthly_is.csv").exists() else pd.DataFrame()
+    return is_stats, oos_stats, monthly
+
+
 def _bm_macro_comparison() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load IS macro comparison grid and OOS macro comparison grid."""
     is_p  = Path("data/results/macro_comparison_grid.csv")
@@ -1662,6 +1670,7 @@ def factors_page():
     is_curves               = _bm_equity_curves()
     macro_is, macro_oos     = _bm_macro_comparison()
     macro_proof             = _bm_macro_proof()
+    is_deciles, oos_deciles, decile_monthly = _bm_deciles()
 
     # ── CSS constants (always end with ; so appending extra props is safe) ────
     HS = ("padding:8px 14px;font-size:11px;font-weight:700;color:#374151;"
@@ -2138,62 +2147,94 @@ def factors_page():
                     "credits": {"enabled": False},
                 }).classes("w-full px-4 pb-4")
 
-        # ── 5. IS vs OOS performance grid ─────────────────────────────────────
-        if not is_df.empty and not oos_df.empty:
+        # ── 5. Decile returns ──────────────────────────────────────────────────
+        if not is_deciles.empty:
             with ui.card().classes("w-full shadow-sm"):
                 with ui.row().classes("items-center gap-2 px-5 pt-4 pb-2"):
-                    ui.icon("grid_on", size="18px").classes("text-indigo-500")
-                    ui.label("IS vs OOS Performance Grid").classes(
+                    ui.icon("bar_chart", size="18px").classes("text-indigo-500")
+                    ui.label("Decile Returns  —  D1 (lowest score) → D10 (highest score)").classes(
                         "text-sm font-bold text-gray-800"
                     )
 
-                for hold in sorted(is_df["hold_months"].unique()):
-                    is_sub  = is_df[is_df["hold_months"]  == hold].sort_values("basket_size")
-                    oos_sub = oos_df[oos_df["hold_months"] == hold].sort_values("basket_size")
-                    if is_sub.empty:
-                        continue
+                sep = "border-left:2px solid #6366f1;"
+                hdr_html = (
+                    th("Decile", "text-align:left;")
+                    + th("IS Ann Ret") + th("IS Vol") + th("IS Sharpe")
+                    + th("IS MaxDD")   + th("IS Hit%")
+                    + th("OOS Ann Ret", sep) + th("OOS Sharpe")
+                    + th("OOS MaxDD")  + th("OOS Hit%")
+                )
+                body_html = ""
 
-                    ui.label(HOLD_LABELS.get(int(hold), f"{int(hold)}-Month Hold")).classes(
-                        "text-xs font-bold text-gray-600 px-5 pt-3 pb-1"
+                DECILE_COLORS = {
+                    "D10": "#059669", "D9": "#34d399",
+                    "D1":  "#dc2626", "D2": "#f87171",
+                }
+                DECILE_LABELS = {f"D{i}": f"D{i}" for i in range(1, 11)}
+
+                for _, irow in is_deciles.iterrows():
+                    d     = str(irow["decile"])
+                    orows = oos_deciles[oos_deciles["decile"] == d] if not oos_deciles.empty else pd.DataFrame()
+                    clr   = DECILE_COLORS.get(d, "#374151")
+                    wt    = "font-weight:700;" if d in ("D1", "D10") else ""
+                    row = (
+                        f'<td style="{CS}text-align:left;{wt}color:{clr};">{d}</td>'
+                        + td_val(irow["ann_return"],  "%", 1)
+                        + td_val(irow["ann_vol"],     "%", 1, color=False)
+                        + td_val(irow["sharpe"],       "", 3)
+                        + td_val(irow["max_drawdown"], "%", 1)
+                        + td_val(irow["hit_rate"],     "%", 1, color=False)
                     )
-                    sep = "border-left:2px solid #6366f1;"
-                    hdr_html = (
-                        th("Basket", "text-align:left;")
-                        + th("IS Ann Ret")  + th("IS Sharpe")
-                        + th("IS MaxDD")    + th("IS Calmar") + th("IS Hit%")
-                        + th("OOS Ann Ret", sep) + th("OOS Sharpe")
-                        + th("OOS MaxDD")   + th("OOS Calmar")
-                        + th("OOS Hit%")   + th("N")
-                    )
-                    body_html = ""
-                    for _, irow in is_sub.iterrows():
-                        b     = int(irow["basket_size"])
-                        orows = oos_sub[oos_sub["basket_size"] == b]
-                        lbl   = BASKET_LABELS.get(b, f"Top {b}")
-                        row   = (
-                            f'<td style="{CS}text-align:left;font-weight:700;color:#1e1b4b;">{lbl}</td>'
-                            + td_val(irow["ann_return"],  "%", 1)
-                            + td_val(irow["sharpe"],       "", 3)
-                            + td_val(irow["max_drawdown"], "%", 1)
-                            + td_val(irow["calmar"],        "", 3)
-                            + td_val(irow["hit_rate"],     "%", 1, color=False)
+                    if orows.empty:
+                        row += f'<td colspan="4" style="{CS}color:#9ca3af;">—</td>'
+                    else:
+                        orow = orows.iloc[0]
+                        row += (
+                            td_val(orow["ann_return"],  "%", 1, extra=sep)
+                            + td_val(orow["sharpe"],       "", 3)
+                            + td_val(orow["max_drawdown"], "%", 1)
+                            + td_val(orow["hit_rate"],     "%", 1, color=False)
                         )
-                        if orows.empty:
-                            row += f'<td colspan="6" style="{CS}color:#9ca3af;">N/A</td>'
-                        else:
-                            orow = orows.iloc[0]
-                            row += (
-                                td_val(orow["ann_return"],  "%", 1, extra=sep)
-                                + td_val(orow["sharpe"],       "", 3)
-                                + td_val(orow["max_drawdown"], "%", 1)
-                                + td_val(orow["calmar"],        "", 3)
-                                + td_val(orow["hit_rate"],     "%", 1, color=False)
-                                + f'<td style="{CS}color:#374151;">{int(orow["n_periods"])}</td>'
-                            )
-                        body_html += f"<tr>{row}</tr>"
+                    body_html += f"<tr>{row}</tr>"
 
-                    with ui.element("div").classes("px-5 pb-4"):
-                        render_table(hdr_html, body_html)
+                # D10–D1 spread row
+                if len(is_deciles) == 10:
+                    d10 = is_deciles[is_deciles["decile"] == "D10"].iloc[0]
+                    d1  = is_deciles[is_deciles["decile"] == "D1"].iloc[0]
+                    spread_is = d10["ann_return"] - d1["ann_return"]
+                    spread_oos_html = ""
+                    if not oos_deciles.empty and len(oos_deciles) == 10:
+                        od10 = oos_deciles[oos_deciles["decile"] == "D10"].iloc[0]
+                        od1  = oos_deciles[oos_deciles["decile"] == "D1"].iloc[0]
+                        spread_oos = od10["ann_return"] - od1["ann_return"]
+                        sv = "#059669" if spread_oos > 0 else "#dc2626"
+                        spread_oos_html = (
+                            f'<td style="{CS}border-left:2px solid #6366f1;color:{sv};font-weight:700;">'
+                            f'{"+" if spread_oos > 0 else ""}{spread_oos:.1f}%</td>'
+                            + f'<td colspan="3" style="{CS}color:#9ca3af;"></td>'
+                        )
+                    else:
+                        spread_oos_html = f'<td colspan="4" style="{CS}color:#9ca3af;">—</td>'
+                    sv_is = "#059669" if spread_is > 0 else "#dc2626"
+                    body_html += (
+                        f'<tr style="border-top:2px solid #e5e7eb;">'
+                        f'<td style="{CS}text-align:left;font-weight:700;color:#374151;">D10 – D1 Spread</td>'
+                        f'<td style="{CS}color:{sv_is};font-weight:700;">{"+" if spread_is > 0 else ""}{spread_is:.1f}%</td>'
+                        f'<td colspan="4" style="{CS}color:#9ca3af;"></td>'
+                        + spread_oos_html
+                        + '</tr>'
+                    )
+
+                with ui.element("div").classes("px-5 pb-2"):
+                    ui.html(
+                        f'<p style="font-size:10px;color:#9ca3af;margin:4px 0 6px;">'
+                        f'IS = 2010–2024 ({is_deciles["n"].iloc[0] if not is_deciles.empty else "—"} months)  ·  '
+                        f'OOS = 2025 ({oos_deciles["n"].iloc[0] if not oos_deciles.empty else "—"} months)  ·  '
+                        f'Monthly rebalance · 10 bps/side transaction cost</p>',
+                        sanitize=False,
+                    )
+                with ui.element("div").classes("px-5 pb-4"):
+                    render_table(hdr_html, body_html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
