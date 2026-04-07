@@ -3,7 +3,7 @@
     "mom_52wk_high":   0.10,
     "inv_debt_equity": 0.25,
     "sector_rs_1m":    0.25,
-    "analyst_rev_3m":  0.25,
+    "neg_dispersion":  0.25,
     "hy_tilt":         0.15
   },
   "in_sample_sharpe": null,
@@ -12,6 +12,6 @@
   "hold_months": 1,
   "split_date": null,
   "constraints": {
-    "note": "Default weights. F5 = HY spread tilt (rolling sector beta vs monthly BAMLH0A0HYM2 change × HY spread YOY regime z-score). Macro overlay = HY spread YOY z-score on invested fraction."
+    "note": "F4 = neg_dispersion (low analyst forecast disagreement = high conviction). F5 = HY spread tilt (rolling sector beta vs monthly BAMLH0A0HYM2 change × HY spread YOY regime z-score). Macro overlay = HY spread YOY z-score on invested fraction."
   }
 }

@@ -11,6 +11,43 @@ def zscore(s: pd.Series) -> pd.Series:
     std = s.std()
     return (s - s.mean()) / std if std > 0 else pd.Series(0.0, index=s.index)
 
+
+def sector_zscore(s: pd.Series, sic_map: pd.Series, min_sector_size: int = 5) -> pd.Series:
+    """
+    Within-sector z-score.
+
+    1. Winsorise globally at 1%/99%
+    2. For each sector with >= min_sector_size stocks: z-score within sector
+    3. Stocks whose sector has < min_sector_size fall back to cross-sectional z-score
+
+    The resulting scores have mean ≈ 0 and std ≈ 1 within every sector, so
+    the composite ranking is diversified across sectors rather than concentrating
+    in whichever sector happens to dominate a given factor.
+    """
+    s = s.replace([np.inf, -np.inf], np.nan).dropna()
+    if len(s) < 10:
+        return pd.Series(dtype=float)
+    lo, hi = s.quantile(0.01), s.quantile(0.99)
+    s = s.clip(lo, hi)
+
+    sectors = sic_map.reindex(s.index).fillna("__unknown__")
+    result  = pd.Series(np.nan, index=s.index, dtype=float)
+
+    for sec, grp_idx in sectors.groupby(sectors).groups.items():
+        grp = s.loc[grp_idx]
+        if len(grp) < min_sector_size:
+            continue
+        std = grp.std()
+        result.loc[grp_idx] = (grp - grp.mean()) / std if std > 0 else 0.0
+
+    # Fall back to cross-sectional for unassigned stocks (tiny sector or no SIC)
+    missing = result.index[result.isna()]
+    if len(missing) > 0:
+        fallback = zscore(s.loc[missing])
+        result.loc[fallback.index] = fallback
+
+    return result.dropna()
+
 def sic_to_etf(sic) -> str | None:
     """Map SIC code to the nearest SPDR sector ETF ticker."""
     if pd.isna(sic):

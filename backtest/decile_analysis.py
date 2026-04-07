@@ -31,11 +31,11 @@ from backtest.five_factor_model import (
     build_sector_rs_panel,
     build_analyst_panel,
     build_macro_factor,
-    build_unemployment_tilt_panel,
+    build_hy_tilt_panel,
     build_all_factor_panels,
     FACTOR_WEIGHTS,
 )
-from sectorscope.utils import zscore as _zscore
+from sectorscope.utils import zscore as _zscore, sector_zscore as _sector_zscore
 
 SECTOR_ETFS = ["XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
 
@@ -59,8 +59,9 @@ def load_optimal_weights() -> dict:
 
 
 def build_composite(panels: dict, weights: dict, date: pd.Timestamp,
-                    liquid_stocks: set) -> pd.Series | None:
-    """Compute weighted composite z-score for all liquid stocks at a given date."""
+                    liquid_stocks: set,
+                    sic_map: pd.Series | None = None) -> pd.Series | None:
+    """Compute sector-neutral weighted composite z-score for all liquid stocks at a given date."""
     scored = {}
     for fname, panel in panels.items():
         if date not in panel.index:
@@ -89,7 +90,7 @@ def build_composite(panels: dict, weights: dict, date: pd.Timestamp,
 
 def run_decile_backtest(ret_wide: pd.DataFrame, panels: dict,
                         liq_panel: pd.DataFrame, weights: dict,
-                        label: str) -> pd.DataFrame:
+                        label: str, sic_map: pd.Series | None = None) -> pd.DataFrame:
     """
     For each monthly rebalance date, rank stocks into 10 deciles by composite score,
     compute equal-weighted next-month return per decile.
@@ -108,7 +109,7 @@ def run_decile_backtest(ret_wide: pd.DataFrame, panels: dict,
             liquid_row = liq_panel.loc[rdate].fillna(False)
             liquid_stocks = liquid_stocks.intersection(liquid_row[liquid_row].index)
 
-        composite = build_composite(panels, weights, rdate, liquid_stocks)
+        composite = build_composite(panels, weights, rdate, liquid_stocks, sic_map)
         if composite is None or len(composite) < 100:
             continue
 
@@ -378,14 +379,14 @@ def main():
     except Exception as e:
         print(f"  [SKIP] Analyst: {e}")
 
-    unemp_tilt = pd.DataFrame()
+    hy_tilt = pd.DataFrame()
     try:
-        unemp_tilt = build_unemployment_tilt_panel(ret_full, sic_map)
+        hy_tilt = build_hy_tilt_panel(ret_full, sic_map)
     except Exception as e:
-        print(f"  [SKIP] Unemp tilt: {e}")
+        print(f"  [SKIP] HY tilt: {e}")
 
     print("\n  Building factor panels...")
-    panels = build_all_factor_panels(ret_full, fund_panel, sector_rs, analyst_rev, unemp_tilt)
+    panels = build_all_factor_panels(ret_full, fund_panel, sector_rs, analyst_rev, hy_tilt)
     weights = load_optimal_weights()
     print(f"  Active factors: {list(panels.keys())}")
 
@@ -401,10 +402,10 @@ def main():
     liq_is  = liq_panel.reindex(ret_is.index,  method="ffill") if not liq_panel.empty else pd.DataFrame()
     liq_oos = liq_panel.reindex(ret_oos.index, method="ffill") if not liq_panel.empty else pd.DataFrame()
 
-    print("\n  Running IS decile backtest...")
-    is_monthly  = run_decile_backtest(ret_is,  panels_is,  liq_is,  weights, "IS")
+    print(f"\n  Running IS decile backtest (sector-neutral={not sic_map.empty})...")
+    is_monthly  = run_decile_backtest(ret_is,  panels_is,  liq_is,  weights, "IS",  sic_map)
     print("  Running OOS decile backtest...")
-    oos_monthly = run_decile_backtest(ret_oos, panels_oos, liq_oos, weights, "OOS")
+    oos_monthly = run_decile_backtest(ret_oos, panels_oos, liq_oos, weights, "OOS", sic_map)
 
     is_stats  = compute_decile_stats(is_monthly)
     oos_stats = compute_decile_stats(oos_monthly) if not oos_monthly.empty else pd.DataFrame()

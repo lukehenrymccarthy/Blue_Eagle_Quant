@@ -11,7 +11,7 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sectorscope.metrics import compute_metrics
-from sectorscope.utils import zscore as _zscore, sic_to_etf as _sic_to_etf
+from sectorscope.utils import zscore as _zscore, sector_zscore as _sector_zscore, sic_to_etf as _sic_to_etf
 
 # ── Paths & global config ─────────────────────────────────────────────────────
 RESULTS_DIR = Path("data/results")
@@ -33,7 +33,7 @@ FACTOR_WEIGHTS = {
     "mom_52wk_high":   0.10,
     "inv_debt_equity": 0.25,
     "sector_rs_1m":    0.25,
-    "analyst_rev_3m":  0.25,
+    "neg_dispersion":  0.25,
     "hy_tilt":         0.15,
 }
 
@@ -447,10 +447,10 @@ def build_all_factor_panels(
         print("  F3  Sector RS vs SPY 1m      — [SKIP]")
 
     if not analyst_rev.empty:
-        print(f"  F4  Analyst Rec Revision 3m  — {analyst_rev.shape[1]:,} stocks")
-        panels["analyst_rev_3m"] = analyst_rev
+        print(f"  F4  Neg Analyst Dispersion   — {analyst_rev.shape[1]:,} stocks")
+        panels["neg_dispersion"] = analyst_rev
     else:
-        print("  F4  Analyst Rec Revision 3m  — [SKIP]")
+        print("  F4  Neg Analyst Dispersion   — [SKIP]")
 
     if not hy_tilt.empty:
         print(f"  F5  HY Spread Tilt           — {hy_tilt.shape[1]:,} stocks mapped")
@@ -474,6 +474,7 @@ def run_one_config(
     basket:          int,
     hold_months:     int,
     weights:         dict | None = None,
+    sic_map:         pd.Series | None = None,
 ) -> tuple[pd.Series, pd.Series]:
     """
     Returns (period_returns, monthly_curve).
@@ -504,7 +505,7 @@ def run_one_config(
             if rdate not in panel.index: continue
             row = panel.loc[rdate].dropna()
             row = row[row.index.isin(crsp_universe)]
-            z   = _zscore(row)
+            z = _zscore(row)
             if len(z) >= basket: scored[fname] = z
 
         if not scored:
@@ -714,6 +715,7 @@ def main():
                     basket          = basket,
                     hold_months     = hold,
                     weights         = opt_weights,
+                    sic_map         = sic_map,
                 )
                 m = compute_metrics(curve, hold_months=hold, monthly_curve=monthly)
                 if not m:

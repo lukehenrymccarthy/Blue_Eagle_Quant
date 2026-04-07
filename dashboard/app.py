@@ -52,7 +52,7 @@ SIGNAL_META = {
     "N/A":         {"bg": "#f3f4f6", "text": "#9ca3af", "icon": "?"},
 }
 
-FACTOR_COLS = ["mom_52wk_high", "inv_debt_equity", "sector_rs_1m", "analyst_rev_3m", "hy_tilt"]
+FACTOR_COLS = ["mom_52wk_high", "inv_debt_equity", "sector_rs_1m", "neg_dispersion", "hy_tilt"]
 
 
 # ── Company name lookup (ETF holdings → disk cache fallback) ──────────────────
@@ -830,7 +830,7 @@ def build_stock_rows(df: pd.DataFrame, is_top: bool) -> list[dict]:
             "momentum":    factor_bar(_fval(r, "momentum_18m",   df)) if "momentum_18m"   in df.columns else "—",
             "roe":         factor_bar(_fval(r, "roe_ttm",        df)) if "roe_ttm"        in df.columns else "—",
             "sector_rs":   factor_bar(_fval(r, "sector_rs_3m",   df)) if "sector_rs_3m"   in df.columns else "—",
-            "analyst":     factor_bar(_fval(r, "analyst_rev_3m", df)) if "analyst_rev_3m" in df.columns else "—",
+            "analyst":     factor_bar(_fval(r, "neg_dispersion", df)) if "neg_dispersion" in df.columns else "—",
             "macro":       factor_bar(_fval(r, "macro_hy",       df)) if "macro_hy"       in df.columns else "—",
             "_ticker":         ticker,
             "_sector":         sector,
@@ -839,7 +839,7 @@ def build_stock_rows(df: pd.DataFrame, is_top: bool) -> list[dict]:
             "_momentum_val":   _fval(r, "momentum_18m",   df),
             "_roe_val":        _fval(r, "roe_ttm",        df),
             "_sector_rs_val":  _fval(r, "sector_rs_3m",   df),
-            "_analyst_val":    _fval(r, "analyst_rev_3m", df),
+            "_analyst_val":    _fval(r, "neg_dispersion", df),
             "_macro_val":      _fval(r, "macro_hy",       df),
         }
         rows.append(row)
