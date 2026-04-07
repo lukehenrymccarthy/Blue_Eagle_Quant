@@ -1,0 +1,5 @@
+VERDICT: DROP IT
+
+Supporting evidence:
+  • OOS predictive IC = -0.2880 (negative) — signal inverts out-of-sample.
+  • Suggests the historical relationship was period-specific or noisy.

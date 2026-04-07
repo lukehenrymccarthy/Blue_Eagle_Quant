@@ -1,10 +1,10 @@
 {
   "weights": {
-    "momentum_12m":   0.10,
-    "fund_quality":   0.25,
-    "sector_rs_3m":   0.25,
-    "analyst_rev_3m": 0.25,
-    "oil_beta_tilt":  0.15
+    "mom_52wk_high":   0.10,
+    "inv_debt_equity": 0.25,
+    "sector_rs_1m":    0.25,
+    "analyst_rev_3m":  0.25,
+    "hy_tilt":         0.15
   },
   "in_sample_sharpe": null,
   "oos_sharpe": null,
@@ -12,6 +12,6 @@
   "hold_months": 1,
   "split_date": null,
   "constraints": {
-    "note": "Default weights. Run backtest/optimize_weights.py to calibrate. Macro (HY spread) is a regime overlay on invested fraction, not in composite. Oil beta tilt = rolling_sector_beta × oil_regime_zscore."
+    "note": "Default weights. F5 = HY spread tilt (rolling sector beta vs monthly BAMLH0A0HYM2 change × HY spread YOY regime z-score). Macro overlay = HY spread YOY z-score on invested fraction."
   }
 }

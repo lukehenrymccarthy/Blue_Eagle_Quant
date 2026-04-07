@@ -47,7 +47,55 @@ SIGNAL_META = {
     "N/A":         {"bg": "#f3f4f6", "text": "#9ca3af", "icon": "?"},
 }
 
-FACTOR_COLS = ["momentum_18m", "roe_ttm", "sector_rs_3m", "analyst_rev_3m", "macro_hy"]
+FACTOR_COLS = ["mom_52wk_high", "inv_debt_equity", "sector_rs_1m", "analyst_rev_3m", "hy_tilt"]
+
+
+# ── Company name lookup (ETF holdings → disk cache fallback) ──────────────────
+import json as _json
+import glob as _glob
+
+_NAME_CACHE_PATH = Path("data/results/company_names.json")
+_COMPANY_NAMES: dict[str, str] = {}
+
+def _build_company_name_map() -> dict[str, str]:
+    """Build ticker→name from ETF holdings files, then merge disk cache."""
+    m: dict[str, str] = {}
+    for f in _glob.glob("data/etf_holdings/*.parquet"):
+        try:
+            df = pd.read_parquet(f, columns=["ticker", "name"])
+            for _, row in df.dropna(subset=["ticker", "name"]).iterrows():
+                m[str(row["ticker"]).upper().strip()] = str(row["name"]).strip().title()
+        except Exception:
+            pass
+    # Merge disk cache (allows yfinance fallbacks saved earlier to persist)
+    if _NAME_CACHE_PATH.exists():
+        try:
+            with open(_NAME_CACHE_PATH) as fh:
+                m.update(_json.load(fh))
+        except Exception:
+            pass
+    return m
+
+_COMPANY_NAMES = _build_company_name_map()
+
+def _company_name(ticker: str) -> str:
+    """Return company name for ticker, fetching from yfinance if not cached."""
+    name = _COMPANY_NAMES.get(ticker.upper(), "")
+    if not name:
+        try:
+            info = yf.Ticker(ticker).info
+            name = info.get("longName") or info.get("shortName") or ""
+            if name:
+                _COMPANY_NAMES[ticker.upper()] = name
+                try:
+                    _NAME_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    with open(_NAME_CACHE_PATH, "w") as fh:
+                        _json.dump(_COMPANY_NAMES, fh, indent=2)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return name
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -191,14 +239,28 @@ def signal_badge_html(signal: str) -> str:
     )
 
 
-def ticker_cell_html(ticker: str, rank: int, is_top: bool) -> str:
+def ticker_cell_html(ticker: str, rank: int, is_top: bool,
+                     company: str = "", sector: str = "") -> str:
     bg    = "#f0f4ff" if is_top else "#fff0f0"
     color = "#4f46e5" if is_top else "#dc2626"
+    sub_parts = []
+    if company:
+        sub_parts.append(f'<span style="color:#6b7280;font-size:11px;">{company}</span>')
+    if sector:
+        sub_parts.append(f'<span style="color:#9ca3af;font-size:10px;">· {sector}</span>')
+    sub_html = (
+        f'<div style="display:flex;align-items:center;gap:5px;margin-top:1px;">'
+        + "".join(sub_parts) + "</div>"
+        if sub_parts else ""
+    )
     return (
         f'<div style="display:flex;align-items:center;gap:7px">'
         f'<span style="background:{bg};color:{color};border-radius:4px;'
-        f'padding:1px 5px;font-size:10px;font-weight:600">#{rank}</span>'
-        f'<strong style="font-size:13px">{ticker}</strong></div>'
+        f'padding:1px 5px;font-size:10px;font-weight:600;flex-shrink:0">#{rank}</span>'
+        f'<div>'
+        f'<strong style="font-size:13px">{ticker}</strong>'
+        f'{sub_html}'
+        f'</div></div>'
     )
 
 
@@ -212,7 +274,7 @@ def make_header(active: str, as_of: str, macro_txt: str):
         with ui.row().classes("items-center gap-3 py-3"):
             ui.icon("analytics", size="26px")
             with ui.column().classes("gap-0"):
-                ui.label("SectorScope").classes("text-xl font-bold tracking-wide")
+                ui.label("Blue Eagle Capital").classes("text-xl font-bold tracking-wide")
                 ui.label("Five-Factor Quant Model  ·  Equal-Weight").classes(
                     "text-xs text-indigo-200"
                 )
@@ -220,6 +282,7 @@ def make_header(active: str, as_of: str, macro_txt: str):
             # Nav tabs
             for label, href, key in [("Sector ETFs", "/", "etf"),
                                       ("Top / Bottom Stocks", "/stocks", "stocks"),
+                                      ("Backtest Methodology", "/factors", "factors"),
                                       ("Model Methodology", "/methodology", "methodology")]:
                 cls = ("bg-white text-indigo-700 font-bold" if active == key
                        else "text-indigo-200 hover:text-white")
@@ -241,12 +304,14 @@ def open_stock_popup(dialog: ui.dialog, row: dict) -> None:
     sign      = "+" if composite >= 0 else ""
     meta      = SECTOR_META.get(etf, {"bg": "#f3f4f6", "text": "#374151", "dot": "#6b7280"})
 
+    # Offset scores by +3 so all values are ≥ 0 (removes the hollow centre gap
+    # in Highcharts polar-area charts which appear when min < 0).
     scores = [
-        round(row.get("_momentum_val",   0), 3),
-        round(row.get("_roe_val",        0), 3),
-        round(row.get("_sector_rs_val",  0), 3),
-        round(row.get("_analyst_val",    0), 3),
-        round(row.get("_macro_val",      0), 3),
+        round(row.get("_momentum_val",   0) + 3, 3),
+        round(row.get("_roe_val",        0) + 3, 3),
+        round(row.get("_sector_rs_val",  0) + 3, 3),
+        round(row.get("_analyst_val",    0) + 3, 3),
+        round(row.get("_macro_val",      0) + 3, 3),
     ]
     fill_color = "rgba(59,130,246,0.25)" if composite >= 0 else "rgba(239,68,68,0.20)"
     line_color = "#3b82f6" if composite >= 0 else "#ef4444"
@@ -285,8 +350,7 @@ def open_stock_popup(dialog: ui.dialog, row: dict) -> None:
                     "chart": {"polar": True, "type": "area",
                               "backgroundColor": "transparent", "margin": [20, 20, 20, 20]},
                     "title": {"text": ""}, "credits": {"enabled": False}, "legend": {"enabled": False},
-                    "tooltip": {"pointFormat": "<b>{point.y:.2f}σ</b>",
-                                "headerFormat": "<span>{series.name}</span><br>"},
+                    "tooltip": {"enabled": False},
                     "pane": {"size": "80%"},
                     "xAxis": {
                         "categories": ["Momentum", "ROE TTM", "Sector RS", "Analyst Rev", "Macro HY"],
@@ -295,8 +359,8 @@ def open_stock_popup(dialog: ui.dialog, row: dict) -> None:
                     },
                     "yAxis": {
                         "gridLineInterpolation": "polygon", "lineWidth": 0,
-                        "min": -3, "max": 3, "tickInterval": 1,
-                        "labels": {"style": {"fontSize": "10px", "color": "#9ca3af"}},
+                        "min": 0, "max": 6, "tickInterval": 1,
+                        "labels": {"enabled": False},
                     },
                     "series": [{
                         "name": "Z-Score", "data": scores, "pointPlacement": "on",
@@ -748,12 +812,13 @@ def build_stock_rows(df: pd.DataFrame, is_top: bool) -> list[dict]:
 
     rows = []
     for i, (idx, r) in enumerate(df.iterrows()):
-        ticker = str(idx).upper() if df.index.dtype == object else r.get("ticker", "—")
-        etf    = etf_by_p.get(r.get("permno", -1), "—") or "—"
-        sector = ETF_NAMES.get(etf, "Other")
+        ticker  = str(idx).upper() if df.index.dtype == object else r.get("ticker", "—")
+        etf     = etf_by_p.get(r.get("permno", -1), "—") or "—"
+        sector  = ETF_NAMES.get(etf, "Other")
+        company = _company_name(ticker)
 
         row = {
-            "ticker_cell": ticker_cell_html(ticker, i + 1, is_top),
+            "ticker_cell": ticker_cell_html(ticker, i + 1, is_top, company, sector),
             "sector_cell": sector_badge_html(etf),
             "composite":   composite_bar(float(r["composite"])),
             "momentum":    factor_bar(_fval(r, "momentum_18m",   df)) if "momentum_18m"   in df.columns else "—",
@@ -926,75 +991,76 @@ def methodology_page():
     FACTOR_DEFS = [
         {
             "id":     "momentum",
-            "label":  "F1 — Momentum 18m-1m",
+            "label":  "F1 — 52-Week High Proximity",
             "short":  "Momentum",
             "icon":   "trending_up",
             "color":  "#6366f1",
             "source": "CRSP monthly returns",
             "desc":   (
-                "18-month cumulative return skipping the most recent month. "
-                "Captures the well-documented price momentum anomaly — "
-                "recent winners tend to continue outperforming over the next 6–12 months."
+                "Current price divided by the rolling 12-month maximum price. "
+                "Stocks trading near their 52-week high exhibit strong price momentum "
+                "and tend to continue outperforming — the #1 ranked momentum signal by IS ICIR."
             ),
-            "detail": "Winsorised at 1/99%, cross-sectionally z-scored each month.",
+            "detail": "Cross-sectionally z-scored each month. 1-month lag applied.",
         },
         {
-            "id":     "roe",
-            "label":  "F2 — ROE TTM",
-            "short":  "ROE TTM",
+            "id":     "quality",
+            "label":  "F2 — Fundamental Quality",
+            "short":  "Quality",
             "icon":   "account_balance",
             "color":  "#10b981",
             "source": "Compustat quarterly (PIT via rdq)",
             "desc":   (
-                "Return on equity over the trailing twelve months. "
-                "Screens for profitable, capital-efficient businesses. "
-                "Point-in-time: uses the actual earnings release date (rdq) "
-                "so no lookahead bias — only data publicly available at rebalance."
+                "Average of three sector-neutral z-scores: "
+                "Inv Debt/Equity (equity ÷ liabilities), Earnings Yield (earnings ÷ price), "
+                "and Neg Accruals (−(net income − operating cash flow) ÷ assets). "
+                "Screens for capital-efficient, cash-generative businesses with low leverage."
             ),
-            "detail": "Staleness filter: values older than 15 months set to NaN.",
+            "detail": "Point-in-time via rdq. Sector-neutral z-score applied within each GICS sector.",
         },
         {
             "id":     "sector_rs",
-            "label":  "F3 — Sector RS vs SPY 3m",
+            "label":  "F3 — Sector Relative Strength 1m",
             "short":  "Sector RS",
             "icon":   "donut_large",
             "color":  "#f59e0b",
             "source": "SPDR sector ETF prices (yfinance)",
             "desc":   (
-                "3-month cumulative return of the stock's SPDR sector ETF minus SPY's "
-                "3-month return. Stocks in outperforming sectors inherit a tailwind; "
-                "those in lagging sectors face a headwind. Captures sector rotation cycles."
+                "1-month return of the stock's SPDR sector ETF minus SPY's 1-month return. "
+                "Stocks in outperforming sectors inherit a tailwind. "
+                "1-month horizon outperforms 3-month on OOS ICIR (+0.482 vs +0.262)."
             ),
             "detail": "SIC code → GICS-aligned sector ETF mapping (11 SPDR ETFs).",
         },
         {
             "id":     "analyst",
-            "label":  "F4 — Analyst Rev 3m",
-            "short":  "Analyst Rev",
+            "label":  "F4 — Neg Analyst Dispersion",
+            "short":  "Analyst",
             "icon":   "groups",
             "color":  "#ec4899",
             "source": "IBES consensus (WRDS)",
             "desc":   (
-                "Change in mean analyst recommendation over the past 3 months. "
-                "Upgrades signal improving fundamental outlook; downgrades signal deterioration. "
-                "Uses statpers (consensus compilation date) as the PIT anchor."
+                "Negative of the cross-sectional standard deviation of analyst EPS forecasts. "
+                "Low dispersion (high agreement) is a bullish signal — when analysts broadly "
+                "agree on a stock's outlook, it tends to outperform. "
+                "OOS ICIR of +3.435 — strongest single signal in the model."
             ),
-            "detail": "Net upgrades (numup − numdown) and buy-% revision also computed.",
+            "detail": "Uses statpers (consensus compilation date) as PIT anchor. Cross-sectionally z-scored.",
         },
         {
             "id":     "macro",
-            "label":  "F5 — Macro HY Spread",
-            "short":  "Macro HY",
+            "label":  "F5 — HY Spread Tilt",
+            "short":  "Macro",
             "icon":   "public",
             "color":  "#0ea5e9",
-            "source": "FRED — ICE BofA HY OAS",
+            "source": "FRED — BAMLH0A0HYM2",
             "desc":   (
-                "Rolling 36-month z-score of the 3-month change in the high-yield credit spread "
-                "(ICE BofA HY OAS), sign-flipped. Narrowing spreads → risk-on → higher score; "
-                "widening spreads → risk-off → lower score. Market-wide scalar applied equally "
-                "to all stocks — acts as a macro timing overlay."
+                "Sector beta multiplied by the rolling z-score of HY spread YOY change (sign-flipped). "
+                "When spreads are tightening (positive z), sectors with high HY sensitivity "
+                "get a score boost. Also drives the macro overlay: "
+                "z < −1 → 70% invested, z < −0.5 → 85% invested."
             ),
-            "detail": "Sign-flipped: positive = bullish macro environment.",
+            "detail": "36-month rolling beta of sector ETF vs monthly BAMLH0A0HYM2 change. 1-month pub lag.",
         },
     ]
 
@@ -1010,7 +1076,7 @@ def methodology_page():
                     "font-size:28px;font-weight:900;color:#ffffff;letter-spacing:-0.01em"
                 )
                 ui.label(
-                    "Equal-weight composite of five independent alpha signals — "
+                    "Composite of five independent alpha signals — "
                     "momentum, quality, sector rotation, analyst sentiment, and macro regime."
                 ).style("font-size:14px;color:rgba(255,255,255,0.70);margin-top:6px;max-width:700px")
 
@@ -1018,7 +1084,7 @@ def methodology_page():
                 for label, value, border in [
                     ("Universe",        "~8,700 US equities",   True),
                     ("Rebalance",       "Monthly",              True),
-                    ("Weighting",       "Equal weight (1/5)",   True),
+                    ("Weighting",       "Factor-weighted",      True),
                     ("PIT discipline",  "rdq + statpers",       True),
                     ("Backtest period", "2005 – 2024 (20 yr)",  False),
                 ]:
@@ -1394,8 +1460,737 @@ def methodology_page():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# BACKTEST METHODOLOGY — DATA LOADERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _bm_factor_eval() -> pd.DataFrame:
+    p = Path("data/results/factor_evaluation.csv")
+    return pd.read_csv(p) if p.exists() else pd.DataFrame()
+
+
+def _bm_is_oos() -> tuple[pd.DataFrame, pd.DataFrame]:
+    is_p  = Path("data/results/oos_is_summary.csv")
+    oos_p = Path("data/results/oos_2025_summary.csv")
+    is_df  = pd.read_csv(is_p)  if is_p.exists()  else pd.DataFrame()
+    oos_df = pd.read_csv(oos_p) if oos_p.exists() else pd.DataFrame()
+    return is_df, oos_df
+
+
+def _bm_macro_comparison() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load IS macro comparison grid and OOS macro comparison grid."""
+    is_p  = Path("data/results/macro_comparison_grid.csv")
+    oos_p = Path("data/results/macro_oos_grid.csv")
+    is_df  = pd.read_csv(is_p)  if is_p.exists()  else pd.DataFrame()
+    oos_df = (pd.read_csv(oos_p)[lambda d: d["window"] == "oos"].drop(columns="window")
+              if oos_p.exists() else pd.DataFrame())
+    return is_df, oos_df
+
+
+def _bm_macro_proof() -> dict:
+    """Load macro_proof outputs from data/results/macro_proof/."""
+    base = Path("data/results/macro_proof")
+    out: dict = {}
+    for name in ("predictive_correlations", "regime_buckets", "horse_race",
+                 "incremental_regression", "overlay_logic"):
+        p = base / f"{name}.csv"
+        if p.exists():
+            try:
+                out[name] = pd.read_csv(p)
+            except Exception:
+                pass
+    return out
+
+
+def _bm_equity_curves() -> dict:
+    """Return IS NAV dict (col → [[ms, val]]) from local parquet only."""
+    curves: dict = {}
+    p = Path("data/results/five_factor_curves.parquet")
+    if not p.exists():
+        return curves
+    try:
+        raw = pd.read_parquet(p)
+        for col in ["top10_hold1m", "top25_hold1m", "top50_hold1m", "top100_hold1m"]:
+            if col in raw.columns:
+                r   = raw[col].dropna()
+                nav = (1 + r).cumprod()
+                curves[col] = [[int(pd.Timestamp(ts).timestamp() * 1000), round(float(v), 4)]
+                               for ts, v in nav.items()]
+    except Exception:
+        pass
+    return curves
+
+
+# ── colour palette for factor groups ──────────────────────────────────────────
+_GROUP_COLOR = {
+    "momentum": "#6366f1",
+    "quality":  "#10b981",
+    "sector":   "#f59e0b",
+    "analyst":  "#ec4899",
+    "macro":    "#0ea5e9",
+}
+_MODEL_SELECTED = {
+    "mom_52wk_high", "inv_debt_equity", "earnings_yield",
+    "neg_accruals", "sector_rs_1m", "neg_dispersion",
+}
+
+
+def _f1_load() -> tuple[list, float]:
+    """52-week high proximity: SPY as market-level proxy (yfinance)."""
+    try:
+        raw  = yf.download("SPY", period="4y", interval="1mo",
+                           auto_adjust=True, progress=False)["Close"].squeeze().dropna()
+        prox = (raw / raw.rolling(12).max()).dropna()
+        series = [[int(ts.timestamp() * 1000), round(float(v), 4)] for ts, v in prox.items()]
+        return series, round(float(prox.iloc[-1]), 4)
+    except Exception:
+        return [], float("nan")
+
+
+def _f2_load() -> tuple[list, float]:
+    """Quality composite: aggregate Inv D/E + EY + Neg Accruals from Compustat."""
+    try:
+        needed = ["permno", "available_date", "earnings_yield", "ceqq", "ltq",
+                  "ibq_ttm", "oancfq_ttm", "atq"]
+        schema = pd.read_parquet(
+            "data/fundamentals/compustat_quarterly.parquet", columns=[]).columns.tolist()
+        cols   = [c for c in needed if c in schema]
+        fund   = pd.read_parquet("data/fundamentals/compustat_quarterly.parquet", columns=cols)
+        fund["available_date"] = pd.to_datetime(fund["available_date"])
+
+        parts = []
+        if "ceqq" in fund.columns and "ltq" in fund.columns:
+            fund["inv_de"] = fund["ceqq"] / fund["ltq"].replace(0, np.nan)
+            parts.append("inv_de")
+        if "earnings_yield" in fund.columns:
+            parts.append("earnings_yield")
+        if all(c in fund.columns for c in ["ibq_ttm", "oancfq_ttm", "atq"]):
+            fund["neg_acc"] = (-(fund["ibq_ttm"] - fund["oancfq_ttm"])
+                               / fund["atq"].replace(0, np.nan))
+            parts.append("neg_acc")
+        if not parts:
+            return [], float("nan")
+
+        monthly_zs = []
+        for sig in parts:
+            m  = fund.dropna(subset=[sig]).groupby(
+                fund["available_date"].dt.to_period("M"))[sig].median()
+            mu = m.rolling(36, min_periods=12).mean()
+            sd = m.rolling(36, min_periods=12).std().replace(0, np.nan)
+            monthly_zs.append(((m - mu) / sd).dropna())
+
+        combined = pd.concat(monthly_zs, axis=1).mean(axis=1).dropna()
+        combined.index = combined.index.to_timestamp()
+        series  = [[int(ts.timestamp() * 1000), round(float(v), 4)]
+                   for ts, v in combined.items()]
+        return series, round(float(combined.iloc[-1]), 4)
+    except Exception:
+        return [], float("nan")
+
+
+def _f3_load() -> tuple[dict, list]:
+    """Sector RS 1m: current RS per sector + equal-weight avg time series."""
+    try:
+        etfs = ["XLC", "XLY", "XLP", "XLE", "XLF",
+                "XLV", "XLI", "XLB", "XLRE", "XLK", "XLU"]
+        raw  = yf.download(etfs + ["SPY"], period="4y", interval="1mo",
+                           auto_adjust=True, progress=False)["Close"].dropna(how="all")
+        ret  = raw.pct_change().dropna(how="all")
+        spy  = ret["SPY"]
+        rs   = ret[etfs].subtract(spy, axis=0)
+        current = {e: round(float(rs[e].iloc[-1]), 4)
+                   for e in etfs if e in rs.columns}
+        avg_ts  = rs.mean(axis=1).dropna()
+        series  = [[int(ts.timestamp() * 1000), round(float(v), 4)]
+                   for ts, v in avg_ts.items()]
+        return current, series
+    except Exception:
+        return {}, []
+
+
+def _f4_load() -> tuple[list, float]:
+    """Neg analyst dispersion: cross-sectional monthly mean from IBES."""
+    try:
+        ibes = pd.read_parquet("data/analyst/ibes_signals.parquet",
+                               columns=["statpers", "neg_dispersion"])
+        ibes["statpers"] = pd.to_datetime(ibes["statpers"])
+        monthly = (ibes.groupby(ibes["statpers"].dt.to_period("M"))["neg_dispersion"]
+                   .mean().dropna())
+        monthly.index = monthly.index.to_timestamp()
+        series  = [[int(ts.timestamp() * 1000), round(float(v), 4)]
+                   for ts, v in monthly.items()]
+        return series, round(float(monthly.iloc[-1]), 4)
+    except Exception:
+        return [], float("nan")
+
+
+def _f5_load() -> tuple[list, float]:
+    """HY spread YOY rolling z-score from FRED (the F5 regime signal)."""
+    try:
+        raw    = pd.read_parquet("data/macro/fred_raw.parquet")
+        raw.index = pd.to_datetime(raw.index)
+        hy     = raw["BAMLH0A0HYM2"].resample("ME").last().dropna()
+        yoy    = hy.diff(12)
+        mu     = yoy.rolling(36, min_periods=12).mean()
+        sigma  = yoy.rolling(36, min_periods=12).std().replace(0, np.nan)
+        z      = (-((yoy - mu) / sigma)).shift(1).dropna()
+        series = [[int(ts.timestamp() * 1000), round(float(v), 3)] for ts, v in z.items()]
+        return series, round(float(z.iloc[-1]), 3)
+    except Exception:
+        return [], float("nan")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 4 — BACKTEST METHODOLOGY
+# ══════════════════════════════════════════════════════════════════════════════
+
+@ui.page("/factors")
+def factors_page():
+    as_of                         = score_as_of()
+    macro_txt, macro_bg, macro_fg = macro_status()
+    make_header("factors", as_of, macro_txt)
+
+    fe                      = _bm_factor_eval()
+    is_df, oos_df           = _bm_is_oos()
+    is_curves               = _bm_equity_curves()
+    macro_is, macro_oos     = _bm_macro_comparison()
+    macro_proof             = _bm_macro_proof()
+
+    # ── CSS constants (always end with ; so appending extra props is safe) ────
+    HS = ("padding:8px 14px;font-size:11px;font-weight:700;color:#374151;"
+          "background:#f9fafb;border-bottom:2px solid #e5e7eb;white-space:nowrap;"
+          "text-align:right;")
+    CS = ("padding:7px 14px;font-size:11px;border-bottom:1px solid #f3f4f6;"
+          "text-align:right;white-space:nowrap;")
+
+    def th(text, extra=""):
+        return f'<th style="{HS}{extra}">{text}</th>'
+
+    def td_val(v, unit="", decimals=2, color=True, extra=""):
+        if pd.isna(v):
+            return f'<td style="{CS}{extra}color:#9ca3af;">—</td>'
+        sign = "+" if v > 0 else ""
+        clr  = ("#059669" if (color and v > 0)
+                else ("#dc2626" if (color and v < 0) else "#374151"))
+        return (f'<td style="{CS}{extra}color:{clr};font-weight:600;">'
+                f'{sign}{v:.{decimals}f}{unit}</td>')
+
+    def render_table(hdr_html: str, body_html: str):
+        html = (
+            '<div style="overflow-x:auto;">'
+            '<table style="width:100%;border-collapse:collapse;">'
+            f'<thead><tr>{hdr_html}</tr></thead>'
+            f'<tbody>{body_html}</tbody>'
+            '</table></div>'
+        )
+        ui.html(html, sanitize=False)
+
+    HOLD_LABELS   = {1: "1-Month Hold", 2: "2-Month Hold",
+                     3: "3-Month Hold",  6: "6-Month Hold"}
+    BASKET_LABELS = {10: "Top 10", 25: "Top 25", 50: "Top 50", 100: "Top 100"}
+
+    # Each factor entry may have a "subs" list for composite factors.
+    # subs: [{"signal": ..., "label": ..., "rationale": ...}, ...]
+    SELECTED_FACTORS = [
+        {
+            "code": "F1", "signal": "mom_52wk_high", "label": "52-Wk High Proximity",
+            "group": "momentum", "weight": "10%",
+            "rationale": "Only momentum signal to survive BH correction. "
+                         "Price near 52-week high indicates persistent upward momentum.",
+            "subs": [],
+        },
+        {
+            "code": "F2", "signal": None, "label": "Fundamental Quality",
+            "group": "quality", "weight": "25%",
+            "rationale": "Composite z-score of three Compustat quality signals. "
+                         "PIT-anchored to earnings release date.",
+            "subs": [
+                {"signal": "inv_debt_equity", "label": "Inv Debt/Equity",
+                 "rationale": "Highest OOS ICIR in the entire universe (+3.63). "
+                              "Low leverage firms systematically outperform."},
+                {"signal": "earnings_yield",  "label": "Earnings Yield",
+                 "rationale": "Strong OOS ICIR of +2.76. Value signal uncorrelated with D/E."},
+                {"signal": "neg_accruals",    "label": "Neg Accruals",
+                 "rationale": "Cash earnings quality screen. Positive OOS ICIR with low "
+                              "correlation to the other two quality signals."},
+            ],
+        },
+        {
+            "code": "F3", "signal": "sector_rs_1m", "label": "Sector RS 1m",
+            "group": "sector", "weight": "25%",
+            "rationale": "Best OOS ICIR among sector signals (+0.48). Short lookback "
+                         "avoids mean-reversion at longer horizons.",
+            "subs": [],
+        },
+        {
+            "code": "F4", "signal": "neg_dispersion", "label": "Neg Analyst Dispersion",
+            "group": "analyst", "weight": "25%",
+            "rationale": "Highest OOS ICIR in the analyst group (+3.44). "
+                         "Low analyst disagreement = high conviction stocks outperform.",
+            "subs": [],
+        },
+        {
+            "code": "F5", "signal": "hy_tilt", "label": "HY Spread Tilt",
+            "group": "macro", "weight": "15%",
+            "rationale": "Macro regime overlay. Invested fraction scales with HY spread "
+                         "YOY z-score: below -1 = 70%, below -0.5 = 85%, else 100%.",
+            "subs": [],
+        },
+    ]
+
+    with ui.column().classes("w-full px-6 py-5 gap-5"):
+
+        # ── Title ─────────────────────────────────────────────────────────────
+        with ui.element("div").style("padding:2px 0 4px"):
+            ui.label("Backtest Methodology").style(
+                "font-size:24px;font-weight:800;color:#1e1b4b"
+            )
+            ui.label(
+                "How each factor was discovered, evaluated, and combined "
+                "into the five-factor model."
+            ).style("font-size:13px;color:#6b7280;margin-top:2px")
+
+        # ── 1. Testing framework ──────────────────────────────────────────────
+        with ui.card().classes("w-full shadow-sm"):
+            with ui.row().classes("items-center gap-2 px-5 pt-4 pb-2"):
+                ui.icon("science", size="18px").classes("text-indigo-500")
+                ui.label("Testing Framework").classes("text-sm font-bold text-gray-800")
+            with ui.row().classes("gap-4 px-5 pb-4 flex-wrap"):
+                for lbl, val, sub, clr in [
+                    ("In-Sample Period",     "2010 – 2024",   "", "#6366f1"),
+                    ("Out-of-Sample Period", "2025",           "", "#10b981"),
+                    ("Universe",            "~4,000 stocks",  "US equities · CRSP monthly · avg active per month",   "#f59e0b"),
+                    ("Transaction Cost",    "10 bps/side",    "Applied on full portfolio turnover each rebalance",   "#ec4899"),
+                    ("Risk-Free Rate",      "5% p.a.",        "",  "#0ea5e9"),
+                ]:
+                    with ui.card().classes("flex-1 min-w-44 shadow-none").style(
+                        f"border:1px solid #e5e7eb;border-top:3px solid {clr}"
+                    ):
+                        ui.label(lbl).classes("text-xs text-gray-500 px-3 pt-3")
+                        ui.label(val).style(
+                            f"font-size:17px;font-weight:800;color:{clr};padding:0 12px 2px"
+                        )
+                        ui.label(sub).classes("text-xs text-gray-400 px-3 pb-3").style(
+                            "line-height:1.5"
+                        )
+
+        # ── 2. Factor discovery — per-group top-5 cards ──────────────────────
+        if not fe.empty:
+            GROUP_META = [
+                ("momentum", "Momentum",           "trending_up",    "#6366f1",
+                 "Signals capturing price persistence. Only signals surviving "
+                 "Benjamini-Hochberg FDR correction (α=0.10) were eligible."),
+                ("quality",  "Fundamental Quality","account_balance", "#10b981",
+                 "Balance-sheet and earnings signals from Compustat. "
+                 "Point-in-time anchored to actual earnings release date (rdq)."),
+                ("sector",   "Sector Momentum",    "donut_large",     "#f59e0b",
+                 "Sector ETF return vs SPY. Tests various lookback windows "
+                 "from 1-month to 12-month with and without vol-adjustment."),
+                ("analyst",  "Analyst Signal",     "groups",          "#ec4899",
+                 "IBES consensus signals. Dispersion, revision direction, "
+                 "and coverage changes across 3–6 month horizons."),
+                ("macro",    "Macro / Regime",     "public",          "#0ea5e9",
+                 "Stock beta to macro factor changes. F5 (HY tilt) is a "
+                 "composite regime overlay — not a cross-sectional IC signal."),
+            ]
+
+            with ui.element("div").style("padding:2px 0 2px"):
+                ui.label("Factor Discovery — Top Signals per Group").style(
+                    "font-size:15px;font-weight:700;color:#1e1b4b"
+                )
+                ui.label(
+                    "Top 5 candidate signals per group ranked by OOS ICIR (2025 holdout). "
+                    "Highlighted rows were selected for the live model."
+                ).style("font-size:12px;color:#6b7280;margin-top:2px")
+
+            with ui.element("div").style(
+                "display:grid;"
+                "grid-template-columns:repeat(auto-fill,minmax(380px,1fr));"
+                "gap:16px;"
+            ):
+                RS = "padding:6px 12px;font-size:11px;font-weight:700;color:#6b7280;background:#f9fafb;border-bottom:2px solid #e5e7eb;text-align:right;white-space:nowrap;"
+                RD = "padding:6px 12px;font-size:11px;border-bottom:1px solid #f3f4f6;text-align:right;white-space:nowrap;"
+
+                def _icir_td(v, bg="", rd=RD):
+                    vc = "#059669" if v > 0 else "#dc2626"
+                    return (f'<td style="{rd}{bg}color:{vc};font-weight:600;">'
+                            f'{"+" if v > 0 else ""}{v:.3f}</td>')
+
+                def _na_td(bg="", rd=RD):
+                    return f'<td style="{rd}{bg}color:#9ca3af;">—</td>'
+
+                for grp_key, grp_name, icon, color, note in GROUP_META:
+
+                    # ── Macro group: custom overlay-comparison card ────────
+                    if grp_key == "macro":
+                        with ui.card().classes("shadow-sm").style(
+                            "border-top:3px solid " + color
+                        ):
+                            with ui.row().classes("items-center gap-3 px-4 pt-3 pb-1"):
+                                with ui.element("div").style(
+                                    f"width:30px;height:30px;border-radius:7px;"
+                                    f"background:{color}18;flex-shrink:0;"
+                                    "display:flex;align-items:center;justify-content:center;"
+                                ):
+                                    ui.icon("public", size="16px").style(f"color:{color}")
+                                with ui.column().classes("gap-0"):
+                                    ui.label("Macro / Regime Overlay").style(
+                                        "font-size:13px;font-weight:700;color:#1e1b4b;"
+                                    )
+                                    ui.label(note).style(
+                                        "font-size:10px;color:#9ca3af;line-height:1.4;"
+                                    )
+
+                            # ── helpers scoped to macro card ────────────────
+                            def _pv(df: pd.DataFrame, col: str, default=float("nan")):
+                                return float(df[col].iloc[0]) if not df.empty and col in df.columns else default
+
+                            def _num_td(v, fmt=".3f", pct=False, good_pos=True, base_style=""):
+                                if pd.isna(v):
+                                    return f'<td style="{RD}{base_style}color:#9ca3af;">—</td>'
+                                sign = "+" if v > 0 else ""
+                                txt  = f'{sign}{v:{fmt}}{"%" if pct else ""}'
+                                if good_pos:
+                                    vc = "#059669" if v > 0 else "#dc2626"
+                                else:
+                                    vc = "#dc2626" if v > 0 else "#059669"
+                                return f'<td style="{RD}{base_style}color:{vc};font-weight:600;">{txt}</td>'
+
+                            def _plain_td(txt, base_style=""):
+                                return f'<td style="{RD}{base_style}color:#374151;">{txt}</td>'
+
+                            def _sec(label: str):
+                                ui.html(
+                                    f'<p style="font-size:10px;font-weight:700;color:{color};'
+                                    f'text-transform:uppercase;letter-spacing:.06em;'
+                                    f'margin:14px 0 4px;">{label}</p>',
+                                    sanitize=False,
+                                )
+
+                            with ui.element("div").classes("px-4 pb-4"):
+
+                                # ── Predictive IC comparison across all macro candidates ──
+                                pc = macro_proof.get("predictive_correlations", pd.DataFrame())
+                                if not pc.empty and "signal" in pc.columns and "horizon" in pc.columns:
+                                    pc_1m = (pc[pc["horizon"] == "fwd_1m"]
+                                             .copy()
+                                             .sort_values("is_pearson", ascending=False))
+                                else:
+                                    pc_1m = pd.DataFrame()
+                                if not pc_1m.empty:
+                                    _sec("Predictive IC  —  macro candidates vs fwd 1-month return  (IS = 2010–2024 · OOS = 2025)")
+                                    def _pval_td(v, bg=""):
+                                        if pd.isna(v):
+                                            return f'<td style="{RD}{bg}color:#9ca3af;">—</td>'
+                                        vc = "#059669" if v < 0.05 else "#9ca3af"
+                                        return f'<td style="{RD}{bg}color:{vc};font-weight:600;">{v:.4f}</td>'
+                                    p_hdr = (
+                                        f'<th style="{RS}text-align:left;">Signal</th>'
+                                        f'<th style="{RS}">IS IC</th>'
+                                        f'<th style="{RS}">IS t-stat</th>'
+                                        f'<th style="{RS}">IS p-value</th>'
+                                        f'<th style="{RS}">OOS IC</th>'
+                                        f'<th style="{RS}">OOS t-stat</th>'
+                                    )
+                                    p_body = ""
+                                    for _, pr in pc_1m.iterrows():
+                                        sel = pr["signal"] == "hy_spread"
+                                        bg  = f"background:{color}10;" if sel else ""
+                                        wt  = "font-weight:700;" if sel else ""
+                                        sel_badge = (
+                                            f'&nbsp;<span style="background:{color};color:#fff;'
+                                            f'font-size:9px;font-weight:700;padding:1px 5px;'
+                                            f'border-radius:9999px;">SELECTED</span>'
+                                            if sel else ""
+                                        )
+                                        p_body += (
+                                            f'<tr>'
+                                            f'<td style="{RD}{bg}text-align:left;{wt}color:#1e1b4b;">'
+                                            f'{pr["signal"]}{sel_badge}</td>'
+                                            + _num_td(pr["is_pearson"],  fmt=".3f", base_style=bg)
+                                            + _num_td(pr["is_tstat"],    fmt=".2f", base_style=bg)
+                                            + _pval_td(pr["is_pval"], bg=bg)
+                                            + _num_td(pr.get("oos_pearson", float("nan")), fmt=".3f", base_style=bg)
+                                            + _num_td(pr.get("oos_tstat",   float("nan")), fmt=".2f", base_style=bg)
+                                            + '</tr>'
+                                        )
+                                    render_table(p_hdr, p_body)
+
+
+                                if not macro_proof:
+                                    ui.label("Macro proof data not available. Run backtest/macro_proof.py.").classes(
+                                        "text-xs text-gray-400 pt-2"
+                                    )
+                        continue  # skip normal card rendering for macro
+
+                    grp_rows = (fe[fe["group"] == grp_key]
+                                .sort_values("is_icir", ascending=False)
+                                .head(5))
+
+                    with ui.card().classes("shadow-sm").style("border-top:3px solid " + color):
+                        # Card header
+                        with ui.row().classes("items-center gap-3 px-4 pt-3 pb-1"):
+                            with ui.element("div").style(
+                                f"width:30px;height:30px;border-radius:7px;"
+                                f"background:{color}18;flex-shrink:0;"
+                                "display:flex;align-items:center;justify-content:center;"
+                            ):
+                                ui.icon(icon, size="16px").style(f"color:{color}")
+                            with ui.column().classes("gap-0"):
+                                ui.label(grp_name).style(
+                                    "font-size:13px;font-weight:700;color:#1e1b4b;"
+                                )
+                                ui.label(note).style(
+                                    "font-size:10px;color:#9ca3af;line-height:1.4;"
+                                )
+
+                        hdr_html = (
+                            f'<th style="{RS}text-align:left;width:60%;">Signal</th>'
+                            f'<th style="{RS}">IS ICIR</th>'
+                            f'<th style="{RS}">OOS ICIR</th>'
+                        )
+                        body_html = ""
+
+                        # For macro group, prepend the selected hy_tilt row
+                        if grp_key == "macro":
+                            bg = f"background:{color}12;"
+                            sel_badge = (
+                                f'&nbsp;<span style="background:{color};color:#fff;'
+                                f'font-size:9px;font-weight:700;padding:1px 5px;'
+                                f'border-radius:9999px;">SELECTED</span>'
+                            )
+                            body_html += (
+                                f'<tr>'
+                                f'<td style="{RD}{bg}text-align:left;font-weight:700;color:#1e1b4b;">'
+                                f'hy_tilt{sel_badge}</td>'
+                                + _na_td(bg)
+                                + _na_td(bg)
+                                + '</tr>'
+                                + f'<tr><td colspan="3" style="{RD}color:#9ca3af;font-size:10px;'
+                                + f'font-style:italic;text-align:left;padding:3px 12px 6px;">'
+                                + f'IC ratio not computed — portfolio-level regime overlay, not a '
+                                + f'cross-sectional per-stock signal.</td></tr>'
+                            )
+
+                        for _, r in grp_rows.iterrows():
+                            sig      = r["signal"]
+                            selected = sig in _MODEL_SELECTED
+                            is_ic    = float(r["is_icir"])
+                            oos_ic   = float(r["oos_icir"])
+                            bg       = f"background:{color}12;" if selected else ""
+                            name_wt  = "font-weight:700;" if selected else ""
+                            sel_badge = (
+                                f'&nbsp;<span style="background:{color};color:#fff;'
+                                f'font-size:9px;font-weight:700;padding:1px 5px;'
+                                f'border-radius:9999px;">SELECTED</span>'
+                                if selected else ""
+                            )
+                            body_html += (
+                                f'<tr>'
+                                f'<td style="{RD}{bg}text-align:left;{name_wt}color:#1e1b4b;">'
+                                f'{sig}{sel_badge}</td>'
+                                + _icir_td(is_ic, bg)
+                                + _icir_td(oos_ic, bg)
+                                + '</tr>'
+                            )
+
+                        with ui.element("div").classes("px-3 pb-3"):
+                            render_table(hdr_html, body_html)
+
+        # ── 3. Selected factors & weights ─────────────────────────────────────
+        with ui.card().classes("w-full shadow-sm"):
+            with ui.row().classes("items-center gap-2 px-5 pt-4 pb-3"):
+                ui.icon("check_circle", size="18px").classes("text-green-500")
+                ui.label("Selected Factors and Weights").classes(
+                    "text-sm font-bold text-gray-800"
+                )
+
+            icir_map: dict = {}
+            if not fe.empty:
+                for _, row in fe.iterrows():
+                    icir_map[row["signal"]] = (
+                        round(float(row["is_icir"]),  3),
+                        round(float(row["oos_icir"]), 3),
+                    )
+
+            hdr_html = (
+                th("Factor",   "text-align:left;")
+                + th("Signal", "text-align:left;")
+                + th("Weight")
+                + th("IS ICIR")
+                + th("OOS ICIR")
+            )
+            SUB_CS = ("padding:5px 12px 5px 28px;font-size:10px;"
+                      "border-bottom:1px solid #f3f4f6;text-align:right;white-space:nowrap;")
+            body_html = ""
+            for fac in SELECTED_FACTORS:
+                grp   = fac["group"]
+                color = _GROUP_COLOR.get(grp, "#6b7280")
+                badge = (f'<span style="background:{color}22;color:{color};'
+                         f'font-size:10px;font-weight:700;padding:1px 7px;'
+                         f'border-radius:9999px;">{fac["code"]}</span>')
+
+                if fac["subs"]:
+                    # ── Composite factor: summary row (no individual ICIR) ──
+                    body_html += (
+                        "<tr>"
+                        + f'<td style="{CS}text-align:left;font-weight:700;color:#1e1b4b;">'
+                        + f'{badge}&nbsp;{fac["label"]}</td>'
+                        + f'<td style="{CS}text-align:left;color:#9ca3af;font-style:italic;">composite</td>'
+                        + f'<td style="{CS}font-weight:700;color:#374151;">{fac["weight"]}</td>'
+                        + f'<td style="{CS}color:#9ca3af;">—</td>'
+                        + f'<td style="{CS}color:#9ca3af;">—</td>'
+                        + "</tr>"
+                    )
+                    # ── Sub-component rows ─────────────────────────────────
+                    for i, sub in enumerate(fac["subs"]):
+                        prefix = "└" if i == len(fac["subs"]) - 1 else "├"
+                        is_ic, oos_ic = icir_map.get(sub["signal"], (float("nan"), float("nan")))
+                        sub_bg = f"background:{color}08;"
+                        ic_clr = "#059669" if (not np.isnan(oos_ic) and oos_ic > 0) else "#dc2626"
+                        is_clr = "#374151" if not np.isnan(is_ic) else "#9ca3af"
+                        body_html += (
+                            "<tr>"
+                            + f'<td style="{SUB_CS}{sub_bg}text-align:left;color:#374151;">'
+                            + f'<span style="color:#d1d5db;margin-right:4px;">{prefix}</span>'
+                            + f'<strong>{sub["label"]}</strong></td>'
+                            + f'<td style="{SUB_CS}{sub_bg}text-align:left;'
+                            + f'font-family:monospace;color:#6366f1;font-size:10px;">'
+                            + f'{sub["signal"]}</td>'
+                            + f'<td style="{SUB_CS}{sub_bg}color:#9ca3af;">—</td>'
+                            + (f'<td style="{SUB_CS}{sub_bg}color:{is_clr};">{is_ic:+.3f}</td>'
+                               if not np.isnan(is_ic)
+                               else f'<td style="{SUB_CS}{sub_bg}color:#9ca3af;">—</td>')
+                            + (f'<td style="{SUB_CS}{sub_bg}color:{ic_clr};font-weight:600;">'
+                               f'{oos_ic:+.3f}</td>'
+                               if not np.isnan(oos_ic)
+                               else f'<td style="{SUB_CS}{sub_bg}color:#9ca3af;">—</td>')
+                            + "</tr>"
+                        )
+                else:
+                    # ── Single-signal factor: normal row ───────────────────
+                    sig   = fac["signal"] or ""
+                    is_ic, oos_ic = icir_map.get(sig, (float("nan"), float("nan")))
+                    ic_clr = "#059669" if (not np.isnan(oos_ic) and oos_ic > 0) else "#dc2626"
+                    body_html += (
+                        "<tr>"
+                        + f'<td style="{CS}text-align:left;font-weight:700;color:#1e1b4b;">'
+                        + f'{badge}&nbsp;{fac["label"]}</td>'
+                        + f'<td style="{CS}text-align:left;font-family:monospace;color:#6366f1;">'
+                        + f'{sig}</td>'
+                        + f'<td style="{CS}font-weight:700;color:#374151;">{fac["weight"]}</td>'
+                        + (f'<td style="{CS}color:#374151;">{is_ic:+.3f}</td>'
+                           if not np.isnan(is_ic) else f'<td style="{CS}color:#9ca3af;">—</td>')
+                        + (f'<td style="{CS}color:{ic_clr};font-weight:600;">{oos_ic:+.3f}</td>'
+                           if not np.isnan(oos_ic) else f'<td style="{CS}color:#9ca3af;">—</td>')
+                        + "</tr>"
+                    )
+            with ui.element("div").classes("px-5 pb-4"):
+                render_table(hdr_html, body_html)
+
+        # ── 4. IS cumulative equity curves ────────────────────────────────────
+        if is_curves:
+            with ui.card().classes("w-full shadow-sm"):
+                with ui.row().classes("items-center gap-2 px-5 pt-4 pb-1"):
+                    ui.icon("show_chart", size="18px").classes("text-indigo-500")
+                    ui.label("In-Sample Cumulative NAV — 1-Month Hold (2010–2024)").classes(
+                        "text-sm font-bold text-gray-800"
+                    )
+                ui.label(
+                    "Long portfolio rebalanced monthly. "
+                    "10 bps/side transaction cost applied. Starting NAV = $1."
+                ).classes("text-xs text-gray-500 px-5 pb-3")
+
+                CURVE_META = {
+                    "top10_hold1m":  ("Top 10",  "#6366f1"),
+                    "top25_hold1m":  ("Top 25",  "#10b981"),
+                    "top50_hold1m":  ("Top 50",  "#f59e0b"),
+                    "top100_hold1m": ("Top 100", "#ec4899"),
+                }
+                nav_series = [
+                    {"name": meta[0], "color": meta[1], "lineWidth": 2,
+                     "data": is_curves[col], "marker": {"enabled": False}}
+                    for col, meta in CURVE_META.items() if col in is_curves
+                ]
+                ui.highchart({
+                    "chart": {"type": "line", "height": 360,
+                              "backgroundColor": "transparent",
+                              "margin": [20, 30, 50, 60]},
+                    "title":  {"text": None},
+                    "xAxis":  {"type": "datetime",
+                               "labels": {"style": {"fontSize": "10px"}}},
+                    "yAxis":  {"title": {"text": "NAV ($)"},
+                               "labels": {"format": "${value:.1f}",
+                                          "style": {"fontSize": "10px"}}},
+                    "legend": {"enabled": True, "align": "center",
+                               "verticalAlign": "bottom",
+                               "itemStyle": {"fontSize": "11px"}},
+                    "tooltip": {"xDateFormat": "%b %Y", "valueDecimals": 2,
+                                "valuePrefix": "$"},
+                    "series": nav_series,
+                    "credits": {"enabled": False},
+                }).classes("w-full px-4 pb-4")
+
+        # ── 5. IS vs OOS performance grid ─────────────────────────────────────
+        if not is_df.empty and not oos_df.empty:
+            with ui.card().classes("w-full shadow-sm"):
+                with ui.row().classes("items-center gap-2 px-5 pt-4 pb-2"):
+                    ui.icon("grid_on", size="18px").classes("text-indigo-500")
+                    ui.label("IS vs OOS Performance Grid").classes(
+                        "text-sm font-bold text-gray-800"
+                    )
+
+                for hold in sorted(is_df["hold_months"].unique()):
+                    is_sub  = is_df[is_df["hold_months"]  == hold].sort_values("basket_size")
+                    oos_sub = oos_df[oos_df["hold_months"] == hold].sort_values("basket_size")
+                    if is_sub.empty:
+                        continue
+
+                    ui.label(HOLD_LABELS.get(int(hold), f"{int(hold)}-Month Hold")).classes(
+                        "text-xs font-bold text-gray-600 px-5 pt-3 pb-1"
+                    )
+                    sep = "border-left:2px solid #6366f1;"
+                    hdr_html = (
+                        th("Basket", "text-align:left;")
+                        + th("IS Ann Ret")  + th("IS Sharpe")
+                        + th("IS MaxDD")    + th("IS Calmar") + th("IS Hit%")
+                        + th("OOS Ann Ret", sep) + th("OOS Sharpe")
+                        + th("OOS MaxDD")   + th("OOS Calmar")
+                        + th("OOS Hit%")   + th("N")
+                    )
+                    body_html = ""
+                    for _, irow in is_sub.iterrows():
+                        b     = int(irow["basket_size"])
+                        orows = oos_sub[oos_sub["basket_size"] == b]
+                        lbl   = BASKET_LABELS.get(b, f"Top {b}")
+                        row   = (
+                            f'<td style="{CS}text-align:left;font-weight:700;color:#1e1b4b;">{lbl}</td>'
+                            + td_val(irow["ann_return"],  "%", 1)
+                            + td_val(irow["sharpe"],       "", 3)
+                            + td_val(irow["max_drawdown"], "%", 1)
+                            + td_val(irow["calmar"],        "", 3)
+                            + td_val(irow["hit_rate"],     "%", 1, color=False)
+                        )
+                        if orows.empty:
+                            row += f'<td colspan="6" style="{CS}color:#9ca3af;">N/A</td>'
+                        else:
+                            orow = orows.iloc[0]
+                            row += (
+                                td_val(orow["ann_return"],  "%", 1, extra=sep)
+                                + td_val(orow["sharpe"],       "", 3)
+                                + td_val(orow["max_drawdown"], "%", 1)
+                                + td_val(orow["calmar"],        "", 3)
+                                + td_val(orow["hit_rate"],     "%", 1, color=False)
+                                + f'<td style="{CS}color:#374151;">{int(orow["n_periods"])}</td>'
+                            )
+                        body_html += f"<tr>{row}</tr>"
+
+                    with ui.element("div").classes("px-5 pb-4"):
+                        render_table(hdr_html, body_html)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 ui.run(
-    title   = "SectorScope — Five-Factor Model",
+    title   = "Blue Eagle Capital — Five-Factor Model",
     port    = 8080,
     reload  = False,
     favicon = "📊",

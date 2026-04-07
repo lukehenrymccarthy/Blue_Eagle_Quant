@@ -30,14 +30,14 @@ SECTOR_ETFS = ["XLC", "XLY", "XLP", "XLE", "XLF",
                "XLV", "XLI", "XLB", "XLRE", "XLK", "XLU"]
 
 FACTOR_WEIGHTS = {
-    "momentum_12m":   0.10,
-    "fund_quality":   0.25,
-    "sector_rs_3m":   0.25,
-    "analyst_rev_3m": 0.25,
-    "oil_beta_tilt":  0.15,
+    "mom_52wk_high":   0.10,
+    "inv_debt_equity": 0.25,
+    "sector_rs_1m":    0.25,
+    "analyst_rev_3m":  0.25,
+    "hy_tilt":         0.15,
 }
 
-OIL_BETA_WINDOW = 36   # months for rolling OLS beta vs WTI
+UNEMP_BETA_WINDOW = 36   # months for rolling OLS beta vs unemployment changes
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA LOADING — each function returns a pre-built panel or Series
@@ -63,7 +63,8 @@ def build_compustat_panels(ret_wide: pd.DataFrame) -> tuple[pd.DataFrame, pd.Ser
     schema_names = pq.read_schema(fund_path).names
     sic_col   = "siccd" if "siccd" in schema_names else ("sic" if "sic" in schema_names else None)
     load_cols = ["permno", "datadate", "available_date",
-                 "roe_ttm", "ibq_ttm", "oancfq_ttm", "atq", "saleq", "fcf_yield", "market_cap"]
+                 "roe_ttm", "ibq_ttm", "oancfq_ttm", "atq", "saleq", "earnings_yield",
+                 "market_cap", "ltq", "ceqq"]
     if sic_col: load_cols.append(sic_col)
 
     fund = pd.read_parquet(fund_path, columns=[c for c in load_cols if c in schema_names])
@@ -99,26 +100,24 @@ def build_compustat_panels(ret_wide: pd.DataFrame) -> tuple[pd.DataFrame, pd.Ser
             return df.groupby("sector")["val"].transform(_sec_z)
         return panel.apply(_row_z, axis=1)
 
-    roe_z = _cs_zscore_panel_sector_neutral(_build_signal_panel("roe_ttm"))
+    inv_de_z = pd.DataFrame(dtype=float)
+    if all(c in fund.columns for c in ["ceqq", "ltq"]):
+        fund["inv_de"] = fund["ceqq"] / fund["ltq"].replace(0, np.nan)
+        inv_de_z = _cs_zscore_panel_sector_neutral(_build_signal_panel("inv_de"))
 
-    fcf_z = pd.DataFrame(dtype=float)
-    if "fcf_yield" in fund.columns:
-        fcf_z = _cs_zscore_panel_sector_neutral(_build_signal_panel("fcf_yield"))
+    ey_z = pd.DataFrame(dtype=float)
+    if "earnings_yield" in fund.columns:
+        ey_z = _cs_zscore_panel_sector_neutral(_build_signal_panel("earnings_yield"))
 
     neg_acc_z = pd.DataFrame(dtype=float)
     if all(c in fund.columns for c in ["ibq_ttm", "oancfq_ttm", "atq"]):
         fund["neg_accruals"] = -(fund["ibq_ttm"] - fund["oancfq_ttm"]) / fund["atq"].replace(0, np.nan)
         neg_acc_z = _cs_zscore_panel_sector_neutral(_build_signal_panel("neg_accruals"))
 
-    gp_z = pd.DataFrame(dtype=float)
-    if all(c in fund.columns for c in ["saleq", "atq"]):
-        fund["gross_prof"] = fund["saleq"] / fund["atq"].replace(0, np.nan)
-        gp_z = _cs_zscore_panel_sector_neutral(_build_signal_panel("gross_prof"))
-
-    components = [df for df in [roe_z, fcf_z, neg_acc_z, gp_z] if not df.empty]
+    components = [df for df in [inv_de_z, ey_z, neg_acc_z] if not df.empty]
     if components:
-        fund_quality_panel = pd.concat(components, axis=0).groupby(level=0).mean()
-        fund_quality_panel = fund_quality_panel.reindex(ret_wide.index, method="ffill")
+        combined = pd.concat(components).groupby(level=0).mean()
+        fund_quality_panel = combined.reindex(ret_wide.index, method="ffill")
     else:
         fund_quality_panel = pd.DataFrame()
 
@@ -148,12 +147,11 @@ def build_sector_rs_panel(ret_wide: pd.DataFrame, sic_map: pd.Series) -> pd.Data
     raw = raw.sort_index()
 
     monthly_ret = raw.pct_change()
-    spy_3m  = (1 + monthly_ret["SPY"].fillna(0)).rolling(3).apply(np.prod, raw=True) - 1
+    spy_1m  = monthly_ret["SPY"].fillna(0)
     etf_rs  = {}
     for etf in SECTOR_ETFS:
         if etf not in monthly_ret.columns: continue
-        etf_3m = (1 + monthly_ret[etf].fillna(0)).rolling(3).apply(np.prod, raw=True) - 1
-        etf_rs[etf] = etf_3m - spy_3m
+        etf_rs[etf] = monthly_ret[etf].fillna(0) - spy_1m
 
     etf_rs_df = pd.DataFrame(etf_rs).reindex(ret_wide.index, method="ffill")
 
@@ -183,146 +181,270 @@ def build_analyst_panel(ret_wide: pd.DataFrame) -> pd.DataFrame:
     analyst_path = Path("data/analyst/ibes_signals.parquet")
     if not analyst_path.exists(): return pd.DataFrame()
 
-    ibes = pd.read_parquet(analyst_path, columns=["permno", "statpers", "rev_3m"])
+    ibes = pd.read_parquet(analyst_path, columns=["permno", "statpers", "neg_dispersion"])
     ibes["statpers"] = pd.to_datetime(ibes["statpers"]) + pd.offsets.MonthEnd(0)
     ibes["permno"]   = ibes["permno"].astype(int)
 
-    piv = (ibes.dropna(subset=["rev_3m"])
-           .pivot_table(index="statpers", columns="permno",
-                        values="rev_3m", aggfunc="last"))
-    piv.index = pd.to_datetime(piv.index)
-    monthly = piv.resample("ME").last().ffill()
-    return monthly.reindex(ret_wide.index, method="ffill")
+    def _pivot(col):
+        piv = (ibes.dropna(subset=[col])
+               .pivot_table(index="statpers", columns="permno",
+                            values=col, aggfunc="last"))
+        piv.index = pd.to_datetime(piv.index)
+        return piv.resample("ME").last().ffill().reindex(ret_wide.index, method="ffill")
+
+    def _cs_zscore(panel: pd.DataFrame) -> pd.DataFrame:
+        """Cross-sectional z-score each row (month) to put signals on equal footing."""
+        def _row_z(row):
+            s = row.dropna()
+            if len(s) < 10 or s.std() == 0: return row * 0
+            lo, hi = s.quantile(0.01), s.quantile(0.99)
+            s = s.clip(lo, hi)
+            return (s - s.mean()) / s.std()
+        return panel.apply(_row_z, axis=1)
+
+    disp_panel = _pivot("neg_dispersion")
+
+    if disp_panel.empty:
+        return pd.DataFrame()
+
+    return _cs_zscore(disp_panel)
 
 def build_macro_factor(ret_wide: pd.DataFrame) -> pd.Series | None:
-    macro_path = Path("data/macro/fred_signals.parquet")
-    if not macro_path.exists(): return None
+    """
+    HY spread macro overlay.
+    Computes YOY change in BAMLH0A0HYM2, rolling z-score, negated + 1-month pub lag.
+    Positive z → spreads tightening (risk-on) → stay fully invested.
+    Negative z → spreads widening (risk-off) → reduce equity exposure.
+    """
+    raw_path = Path("data/macro/fred_raw.parquet")
+    if not raw_path.exists(): return None
 
-    signals = pd.read_parquet(macro_path)
-    signals.index = pd.to_datetime(signals.index) + pd.offsets.MonthEnd(0)
+    raw = pd.read_parquet(raw_path)
+    raw.index = pd.to_datetime(raw.index)
+    col = "BAMLH0A0HYM2"
+    if col not in raw.columns: return None
 
-    if "hy_spread_widening" not in signals.columns: return None
-
-    s = signals["hy_spread_widening"].dropna()
-    roll_mean = s.rolling(36, min_periods=12).mean()
-    roll_std  = s.rolling(36, min_periods=12).std().replace(0, np.nan)
-    macro_z   = -((s - roll_mean) / roll_std)
+    hy       = raw[col].resample("ME").last().dropna()
+    yoy      = hy.diff(12)
+    roll_mean = yoy.rolling(36, min_periods=12).mean()
+    roll_std  = yoy.rolling(36, min_periods=12).std().replace(0, np.nan)
+    macro_z  = -((yoy - roll_mean) / roll_std).shift(1)   # negate: tightening = positive
     return macro_z.reindex(ret_wide.index, method="ffill")
 
-def build_oil_beta_panel(ret_wide: pd.DataFrame, sic_map: pd.Series) -> pd.DataFrame:
+def build_unemployment_tilt_panel(ret_wide: pd.DataFrame, sic_map: pd.Series) -> pd.DataFrame:
     """
-    Oil price sensitivity tilt — (date × permno) cross-sectional panel.
+    Unemployment sensitivity tilt — (date × permno) cross-sectional panel.
 
     At each rebalance date t:
-        oil_tilt[stock] = rolling_beta[sector(stock), t]  ×  oil_regime_z[t]
+        unemp_tilt[stock] = rolling_beta[sector(stock), t] × unemp_regime_z[t]
 
     Where:
-        rolling_beta  = 36-month OLS slope of sector_ETF_ret on WTI_ret
-                        (cov(ETF, oil) / var(oil), recalculated each month)
-        oil_regime_z  = rolling z-score of the 3-month WTI cumulative return,
-                        standardised over a trailing 36-month window
+        rolling_beta   = 36-month OLS slope of sector_ETF_ret on monthly UNRATE change
+        unemp_regime_z = rolling z-score of unemployment YOY change (negated)
+                         positive → unemployment falling → reward sectors that rally
+                         with falling unemployment (cyclicals, growth)
 
     Effect:
-        - Energy (XLE)         β ≈ +0.4 → high positive score when oil rising
-        - Airlines/Trucking    β ≈ −0.2 → negative score when oil rising
-        - Tech / Financials    β ≈  0.0 → near-zero score (oil-neutral)
-
-    The panel is cross-sectionally z-scored before entering the composite,
-    so it only changes *relative* rankings — it never tilts all stocks equally.
+        - Cyclicals / high-employment sectors  β > 0 → positive score when unemp falls
+        - Defensives / utilities               β ≈ 0 → near-zero (less labour-sensitive)
     """
     if sic_map.empty:
         return pd.DataFrame()
 
-    print("  Downloading WTI crude oil + sector ETF prices (yfinance)...")
-    raw = yf.download(
-        SECTOR_ETFS + ["CL=F"],
-        start="2007-01-01", end="2025-06-01",
-        interval="1mo", auto_adjust=True, progress=False,
-    )["Close"]
-    raw.index = pd.to_datetime(raw.index) + pd.offsets.MonthEnd(0)
-    raw = raw.sort_index()
-
-    if "CL=F" not in raw.columns:
-        print("  [SKIP] WTI crude oil data unavailable from yfinance")
+    raw_path = Path("data/macro/fred_raw.parquet")
+    if not raw_path.exists():
+        print("  [SKIP] fred_raw.parquet not found — unemployment tilt unavailable")
         return pd.DataFrame()
 
-    monthly_ret = raw.pct_change()
-    oil_ret     = monthly_ret["CL=F"].dropna()
+    print("  Loading UNRATE from FRED raw data...")
+    raw = pd.read_parquet(raw_path)
+    raw.index = pd.to_datetime(raw.index)
+    if "UNRATE" not in raw.columns:
+        print("  [SKIP] UNRATE column missing from fred_raw.parquet")
+        return pd.DataFrame()
 
-    # ── Oil regime: rolling z-score of 3M cumulative WTI return ──────────────
-    oil_3m     = (1 + oil_ret.fillna(0)).rolling(3).apply(np.prod, raw=True) - 1
-    roll_mean  = oil_3m.rolling(36, min_periods=12).mean()
-    roll_std   = oil_3m.rolling(36, min_periods=12).std().replace(0, np.nan)
-    oil_regime = ((oil_3m - roll_mean) / roll_std).reindex(ret_wide.index, method="ffill")
+    unrate = raw["UNRATE"].resample("ME").last().dropna().sort_index()
 
-    # ── Rolling OLS beta: cov(sector_ret, oil_ret) / var(oil_ret) ─────────────
-    # Computed separately per sector ETF over a trailing OIL_BETA_WINDOW window.
+    # ── Unemployment regime: negated rolling z-score of YOY change ───────────
+    yoy       = unrate.diff(12)
+    roll_mean = yoy.rolling(36, min_periods=12).mean()
+    roll_std  = yoy.rolling(36, min_periods=12).std().replace(0, np.nan)
+    unemp_regime = (-((yoy - roll_mean) / roll_std)
+                    .shift(1)                          # 1-month publication lag
+                    .reindex(ret_wide.index, method="ffill"))
+
+    # ── Monthly UNRATE change (stationary series for beta computation) ────────
+    delta_unemp = unrate.diff().dropna()
+
+    # ── Download sector ETF monthly returns ───────────────────────────────────
+    print("  Downloading sector ETF prices (yfinance)...")
+    raw_etf = yf.download(
+        SECTOR_ETFS,
+        start="2007-01-01", end="2026-06-01",
+        interval="1mo", auto_adjust=True, progress=False,
+    )["Close"]
+    raw_etf.index = pd.to_datetime(raw_etf.index) + pd.offsets.MonthEnd(0)
+    monthly_ret = raw_etf.pct_change()
+
+    # ── Rolling OLS beta: cov(sector_ret, delta_unemp) / var(delta_unemp) ────
     etf_betas = {}
     for etf in SECTOR_ETFS:
         if etf not in monthly_ret.columns:
             continue
-        etf_ret    = monthly_ret[etf]
-        common     = oil_ret.index.intersection(etf_ret.index)
-        a_etf      = etf_ret.reindex(common)
-        a_oil      = oil_ret.reindex(common)
-        roll_cov   = a_etf.rolling(OIL_BETA_WINDOW, min_periods=12).cov(a_oil)
-        roll_var   = a_oil.rolling(OIL_BETA_WINDOW, min_periods=12).var().replace(0, np.nan)
-        etf_betas[etf] = (roll_cov / roll_var)
+        etf_ret = monthly_ret[etf]
+        common  = delta_unemp.index.intersection(etf_ret.index)
+        a_etf   = etf_ret.reindex(common)
+        a_unemp = delta_unemp.reindex(common)
+        roll_cov = a_etf.rolling(UNEMP_BETA_WINDOW, min_periods=12).cov(a_unemp)
+        roll_var = a_unemp.rolling(UNEMP_BETA_WINDOW, min_periods=12).var().replace(0, np.nan)
+        etf_betas[etf] = roll_cov / roll_var
 
     if not etf_betas:
         return pd.DataFrame()
 
     beta_df = pd.DataFrame(etf_betas).reindex(ret_wide.index, method="ffill")
 
-    # ── Oil tilt: beta × regime (stock inherits its sector's beta) ────────────
-    # Shape: (n_dates × n_etfs) — each cell is the tilt score for that sector
-    oil_tilt_etf = beta_df.multiply(oil_regime, axis=0)
+    # ── Unemployment tilt: beta × regime ─────────────────────────────────────
+    unemp_tilt_etf = beta_df.multiply(unemp_regime, axis=0)
 
     # ── Broadcast to permno level via sic_map ─────────────────────────────────
     stock_to_etf = sic_map.reindex(ret_wide.columns).dropna()
-    etf_to_idx   = {e: i for i, e in enumerate(oil_tilt_etf.columns)}
+    etf_to_idx   = {e: i for i, e in enumerate(unemp_tilt_etf.columns)}
     matched      = [(s, e) for s, e in stock_to_etf.items() if e in etf_to_idx]
     if not matched:
         return pd.DataFrame()
 
     stocks_out  = [s for s, _ in matched]
     etf_idxs    = [etf_to_idx[e] for _, e in matched]
-    tilt_matrix = oil_tilt_etf.values          # (n_dates, n_etfs)
+    tilt_matrix = unemp_tilt_etf.values
 
-    oil_panel = pd.DataFrame(
+    unemp_panel = pd.DataFrame(
         tilt_matrix[:, etf_idxs],
-        index   = oil_tilt_etf.index,
+        index   = unemp_tilt_etf.index,
         columns = stocks_out,
     )
-    oil_panel.columns = oil_panel.columns.astype(ret_wide.columns.dtype)
-    return oil_panel
+    unemp_panel.columns = unemp_panel.columns.astype(ret_wide.columns.dtype)
+    return unemp_panel
+
+
+def build_hy_tilt_panel(ret_wide: pd.DataFrame, sic_map: pd.Series) -> pd.DataFrame:
+    """
+    HY spread sensitivity tilt — (date × permno) cross-sectional panel.
+
+    At each rebalance date t:
+        hy_tilt[stock] = rolling_beta[sector(stock), t] × hy_regime_z[t]
+
+    Where:
+        rolling_beta = 36-month OLS slope of sector_ETF_ret on monthly HY spread change
+        hy_regime_z  = rolling z-score of HY spread YOY change (negated)
+                       positive → spreads tightening (risk-on) → reward high-beta sectors
+    """
+    if sic_map.empty:
+        return pd.DataFrame()
+
+    raw_path = Path("data/macro/fred_raw.parquet")
+    if not raw_path.exists():
+        print("  [SKIP] fred_raw.parquet not found — HY tilt unavailable")
+        return pd.DataFrame()
+
+    print("  Loading BAMLH0A0HYM2 from FRED raw data...")
+    raw = pd.read_parquet(raw_path)
+    raw.index = pd.to_datetime(raw.index)
+    col = "BAMLH0A0HYM2"
+    if col not in raw.columns:
+        print(f"  [SKIP] {col} column missing from fred_raw.parquet")
+        return pd.DataFrame()
+
+    hy = raw[col].resample("ME").last().dropna().sort_index()
+
+    # ── HY regime: negated rolling z-score of YOY change ─────────────────────
+    yoy       = hy.diff(12)
+    roll_mean = yoy.rolling(36, min_periods=12).mean()
+    roll_std  = yoy.rolling(36, min_periods=12).std().replace(0, np.nan)
+    hy_regime = (-((yoy - roll_mean) / roll_std)
+                 .shift(1)                          # 1-month publication lag
+                 .reindex(ret_wide.index, method="ffill"))
+
+    # ── Monthly HY spread change (stationary series for beta computation) ─────
+    delta_hy = hy.diff().dropna()
+
+    # ── Download sector ETF monthly returns ───────────────────────────────────
+    print("  Downloading sector ETF prices (yfinance)...")
+    raw_etf = yf.download(
+        SECTOR_ETFS,
+        start="2007-01-01", end="2026-06-01",
+        interval="1mo", auto_adjust=True, progress=False,
+    )["Close"]
+    raw_etf.index = pd.to_datetime(raw_etf.index) + pd.offsets.MonthEnd(0)
+    monthly_ret = raw_etf.pct_change()
+
+    # ── Rolling OLS beta: cov(sector_ret, delta_hy) / var(delta_hy) ──────────
+    etf_betas = {}
+    for etf in SECTOR_ETFS:
+        if etf not in monthly_ret.columns:
+            continue
+        etf_ret = monthly_ret[etf]
+        common  = delta_hy.index.intersection(etf_ret.index)
+        a_etf   = etf_ret.reindex(common)
+        a_hy    = delta_hy.reindex(common)
+        roll_cov = a_etf.rolling(UNEMP_BETA_WINDOW, min_periods=12).cov(a_hy)
+        roll_var = a_hy.rolling(UNEMP_BETA_WINDOW, min_periods=12).var().replace(0, np.nan)
+        etf_betas[etf] = roll_cov / roll_var
+
+    if not etf_betas:
+        return pd.DataFrame()
+
+    beta_df = pd.DataFrame(etf_betas).reindex(ret_wide.index, method="ffill")
+
+    # ── HY tilt: beta × regime ────────────────────────────────────────────────
+    hy_tilt_etf = beta_df.multiply(hy_regime, axis=0)
+
+    # ── Broadcast to permno level via sic_map ─────────────────────────────────
+    stock_to_etf = sic_map.reindex(ret_wide.columns).dropna()
+    etf_to_idx   = {e: i for i, e in enumerate(hy_tilt_etf.columns)}
+    matched      = [(s, e) for s, e in stock_to_etf.items() if e in etf_to_idx]
+    if not matched:
+        return pd.DataFrame()
+
+    stocks_out  = [s for s, _ in matched]
+    etf_idxs    = [etf_to_idx[e] for _, e in matched]
+    tilt_matrix = hy_tilt_etf.values
+
+    hy_panel = pd.DataFrame(
+        tilt_matrix[:, etf_idxs],
+        index   = hy_tilt_etf.index,
+        columns = stocks_out,
+    )
+    hy_panel.columns = hy_panel.columns.astype(ret_wide.columns.dtype)
+    return hy_panel
 
 
 def build_all_factor_panels(
-    ret_wide:     pd.DataFrame,
+    ret_wide:    pd.DataFrame,
     fund_quality: pd.DataFrame,
-    sector_rs:    pd.DataFrame,
-    analyst_rev:  pd.DataFrame,
-    oil_beta:     pd.DataFrame,
+    sector_rs:   pd.DataFrame,
+    analyst_rev: pd.DataFrame,
+    hy_tilt:     pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
     panels = {}
 
-    print("  F1  Momentum 12m-1m          — vectorised rolling...")
-    roll = (1 + ret_wide.fillna(0)).rolling(12).apply(np.prod, raw=True) - 1
-    panels["momentum_12m"] = roll.shift(1)
+    print("  F1  52-Wk High Proximity     — vectorised rolling...")
+    price_idx   = (1 + ret_wide.fillna(0)).cumprod()
+    rolling_max = price_idx.rolling(12).max()
+    panels["mom_52wk_high"] = (price_idx / rolling_max).shift(1)
     print(f"       {ret_wide.shape[1]:,} stocks | {ret_wide.shape[0]} months")
 
     if not fund_quality.empty:
-        print(f"  F2  Fund Quality             — {fund_quality.shape[1]:,} stocks")
-        panels["fund_quality"] = fund_quality
+        print(f"  F2  Inv D/E + EY + Neg Acc   — {fund_quality.shape[1]:,} stocks")
+        panels["inv_debt_equity"] = fund_quality
     else:
-        print("  F2  Fund Quality             — [SKIP]")
+        print("  F2  Inv D/E + EY + Neg Acc   — [SKIP]")
 
     if not sector_rs.empty:
-        print(f"  F3  Sector RS vs SPY 3m      — {sector_rs.shape[1]:,} stocks mapped")
-        panels["sector_rs_3m"] = sector_rs
+        print(f"  F3  Sector RS vs SPY 1m      — {sector_rs.shape[1]:,} stocks mapped")
+        panels["sector_rs_1m"] = sector_rs
     else:
-        print("  F3  Sector RS vs SPY 3m      — [SKIP]")
+        print("  F3  Sector RS vs SPY 1m      — [SKIP]")
 
     if not analyst_rev.empty:
         print(f"  F4  Analyst Rec Revision 3m  — {analyst_rev.shape[1]:,} stocks")
@@ -330,11 +452,11 @@ def build_all_factor_panels(
     else:
         print("  F4  Analyst Rec Revision 3m  — [SKIP]")
 
-    if not oil_beta.empty:
-        print(f"  F5  Oil Beta Tilt            — {oil_beta.shape[1]:,} stocks mapped")
-        panels["oil_beta_tilt"] = oil_beta
+    if not hy_tilt.empty:
+        print(f"  F5  HY Spread Tilt           — {hy_tilt.shape[1]:,} stocks mapped")
+        panels["hy_tilt"] = hy_tilt
     else:
-        print("  F5  Oil Beta Tilt            — [SKIP]")
+        print("  F5  HY Spread Tilt           — [SKIP]")
 
     return panels
 
@@ -352,13 +474,21 @@ def run_one_config(
     basket:          int,
     hold_months:     int,
     weights:         dict | None = None,
-) -> pd.Series:
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Returns (period_returns, monthly_curve).
+    period_returns : one return per rebalance period (used for Sharpe, t-stat, hit rate).
+    monthly_curve  : month-by-month returns with TC/macro applied (used for max drawdown).
+    """
     dates        = ret_wide.index
     rebal_dates  = dates[::hold_months]
     factor_names = list(panels.keys())
 
-    port_rets = []
-    prev_hold = set()
+    port_rets    = []
+    monthly_rets = {}   # date -> monthly return for the full drawdown curve
+    prev_hold    = set()
+
+    rf_monthly = (1 + RISK_FREE_ANN) ** (1 / 12) - 1
 
     for i, rdate in enumerate(rebal_dates[:-1]):
         next_rdate = rebal_dates[i + 1]
@@ -396,14 +526,14 @@ def run_one_config(
         if not pd.isna(macro_val):
             if macro_val < -1.0:
                 invested = 0.70
-                if "fund_quality" in effective_weights and "momentum_12m" in effective_weights:
-                    effective_weights["fund_quality"] += 0.10
-                    effective_weights["momentum_12m"] = max(0, effective_weights["momentum_12m"] - 0.10)
+                if "inv_debt_equity" in effective_weights and "mom_52wk_high" in effective_weights:
+                    effective_weights["inv_debt_equity"] += 0.10
+                    effective_weights["mom_52wk_high"] = max(0, effective_weights["mom_52wk_high"] - 0.10)
             elif macro_val < -0.5:
                 invested = 0.85
-                if "fund_quality" in effective_weights and "momentum_12m" in effective_weights:
-                    effective_weights["fund_quality"] += 0.05
-                    effective_weights["momentum_12m"] = max(0, effective_weights["momentum_12m"] - 0.05)
+                if "inv_debt_equity" in effective_weights and "mom_52wk_high" in effective_weights:
+                    effective_weights["inv_debt_equity"] += 0.05
+                    effective_weights["mom_52wk_high"] = max(0, effective_weights["mom_52wk_high"] - 0.05)
 
         cs_factor_names = list(scored.keys())
         w_arr = np.array([effective_weights.get(fn, 1 / len(cs_factor_names)) for fn in cs_factor_names])
@@ -437,7 +567,16 @@ def run_one_config(
         port_rets.append(compound_ret)
         prev_hold = top_n
 
-    return pd.Series(port_rets, index=rebal_dates[:-1])
+        # Build monthly curve: apply invested fraction each month, TC at period start
+        for k, (dt, m_ret) in enumerate(ew_monthly.items()):
+            adj = m_ret * invested + rf_monthly * (1 - invested)
+            if k == 0:
+                adj -= tc_drag
+            monthly_rets[dt] = adj
+
+    period_series = pd.Series(port_rets, index=rebal_dates[:-1])
+    monthly_series = pd.Series(monthly_rets).sort_index()
+    return period_series, monthly_series
 
 def print_results_table(summary: pd.DataFrame, active_factors: list[str],
                         start: str = "", end: str = ""):
@@ -502,9 +641,9 @@ def main():
 
     fund_panel, sic_map, is_liquid_panel = pd.DataFrame(), pd.Series(dtype=str), pd.DataFrame()
     try:
-        print("\n  Loading Compustat (ROE / Accruals / Gross Profit / FCF Yield + SIC)...")
+        print("\n  Loading Compustat (Inv D/E + Earnings Yield + Neg Accruals + SIC)...")
         fund_panel, sic_map, is_liquid_panel = build_compustat_panels(ret_wide)
-        print(f"  Fund Quality  : {fund_panel.shape[1]:,} stocks")
+        print(f"  Quality panel : {fund_panel.shape[1]:,} stocks")
     except Exception as e:
         print(f"  [SKIP] Compustat error: {e}")
 
@@ -524,24 +663,24 @@ def main():
     macro_factor = None
     if use_macro:
         try:
-            print("\n  Loading FRED macro factor...")
+            print("\n  Loading FRED macro factor (HY spread)...")
             macro_factor = build_macro_factor(ret_wide)
         except Exception as e:
             print(f"  [SKIP] Macro error: {e}")
 
-    oil_beta = pd.DataFrame()
+    hy_tilt = pd.DataFrame()
     try:
-        print("\n  Building oil beta tilt panel...")
-        oil_beta = build_oil_beta_panel(ret_wide, sic_map)
-        if not oil_beta.empty:
-            print(f"  Oil Beta      : {oil_beta.shape[1]:,} stocks × {oil_beta.shape[0]} months")
+        print("\n  Building HY spread tilt panel...")
+        hy_tilt = build_hy_tilt_panel(ret_wide, sic_map)
+        if not hy_tilt.empty:
+            print(f"  HY Tilt       : {hy_tilt.shape[1]:,} stocks × {hy_tilt.shape[0]} months")
     except Exception as e:
-        print(f"  [SKIP] Oil beta error: {e}")
+        print(f"  [SKIP] HY tilt error: {e}")
 
     print("\n" + "═" * 70)
     print("  Building factor panels")
     print("═" * 70 + "\n")
-    panels = build_all_factor_panels(ret_wide, fund_panel, sector_rs, analyst_rev, oil_beta)
+    panels = build_all_factor_panels(ret_wide, fund_panel, sector_rs, analyst_rev, hy_tilt)
     active_factors = list(panels.keys())
     
     opt_weights = load_optimal_weights()
@@ -567,7 +706,7 @@ def main():
             label = f"top{basket}_hold{hold}m"
             print(f"  {label:<22}", end=" ... ", flush=True)
             try:
-                curve = run_one_config(
+                curve, monthly = run_one_config(
                     ret_wide        = ret_wide,
                     panels          = panels,
                     macro_factor    = macro_factor if use_macro else None,
@@ -576,7 +715,7 @@ def main():
                     hold_months     = hold,
                     weights         = opt_weights,
                 )
-                m = compute_metrics(curve, hold_months=hold)
+                m = compute_metrics(curve, hold_months=hold, monthly_curve=monthly)
                 if not m:
                     print("skipped")
                     continue

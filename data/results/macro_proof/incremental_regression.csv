@@ -1,0 +1,7 @@
+predictor,coef,t_stat,p_value,vif
+unrate_yoy,0.01993,3.041,0.0024,2.73
+hy_spread,0.02185,4.439,0.0,2.58
+yield_curve,-0.00778,-0.867,0.3858,3.15
+indpro_yoy,0.00401,1.296,0.1949,3.31
+_r2_univariate,0.12255,,,
+_r2_full,0.18516,,,
