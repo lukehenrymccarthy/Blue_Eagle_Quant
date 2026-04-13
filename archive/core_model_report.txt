@@ -1,0 +1,15 @@
+CORE MODEL
+Factors     : sue, mom_52wk_high, sector_rs_1m
+Basket size : 10
+Hold months : 2
+Universe    : top 1000 by market cap
+IS window   : 2005-01-01 to 2024-12-31
+OOS window  : 2025-04-01 to 2026-03-31
+
+IN SAMPLE
+Model : ann_ret=+14.01%  sharpe=0.589  sortino=0.567  calmar=0.380  max_dd=-36.84%  hit=67.5%  n=114
+SPY   : ann_ret=+10.69%  sharpe=0.427  sortino=0.357  calmar=0.233  max_dd=-45.96%  hit=72.8%  n=114
+
+OUT OF SAMPLE
+Model : ann_ret=+43.93%  sharpe=2.684  sortino=nan  calmar=nan  max_dd=+0.00%  hit=100.0%  n=5
+SPY   : ann_ret=+30.43%  sharpe=1.983  sortino=22.486  calmar=nan  max_dd=+0.00%  hit=100.0%  n=5

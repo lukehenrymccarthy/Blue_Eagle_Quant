@@ -6,6 +6,14 @@
 # Large raw data files — regenerate via ingestion scripts
 data/fundamentals/
 data/prices/
+data/analyst/
+data/sectorscope.duckdb
+
+# Old backtest results (superseded)
+data/results/archive/
+
+# Parquet result files (large, regenerate from scripts)
+data/results/*.parquet
 
 # macOS
 .DS_Store

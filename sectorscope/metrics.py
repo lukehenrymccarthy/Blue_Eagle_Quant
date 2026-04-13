@@ -20,8 +20,14 @@ def compute_metrics(r: pd.Series, hold_months: int = 1, risk_free_ann: float = 0
     mu  = float(r.mean())
     std = float(r.std())
     rf_per_period = (1 + risk_free_ann) ** (hold_months / 12) - 1
-    ann_ret = (1 + mu)  ** periods_per_year - 1
+    # CAGR: compound the actual product of returns over the sample length.
+    # (1+mu)^periods_per_year overstates due to variance drag; this is consistent
+    # with total_return shown in the realized-metrics table.
+    total_growth = float((1 + r).prod())
+    n_years = len(r) / periods_per_year
+    ann_ret = total_growth ** (1 / n_years) - 1
     ann_vol = std * np.sqrt(periods_per_year)
+    # Sharpe uses arithmetic mean excess return (standard formula).
     sharpe  = (mu - rf_per_period) / std * np.sqrt(periods_per_year) if std > 0 else np.nan
 
     downside = r[r < rf_per_period] - rf_per_period

@@ -1,0 +1,14 @@
+metric,model,spy
+period,Apr 2025 – Mar 2026,Apr 2025 – Mar 2026
+n_months,11,11
+total_return_pct,23.77,18.62
+ann_return_pct,26.19,20.48
+ann_vol_pct,11.72,10.55
+sharpe,1.638,1.364
+sortino,4.596,1.508
+calmar,14.845,3.555
+max_drawdown_pct,-1.76,-5.76
+hit_rate_pct,72.7,81.8
+best_month_pct,9.43,6.28
+worst_month_pct,-1.49,-4.94
+t_stat,1.97,1.75

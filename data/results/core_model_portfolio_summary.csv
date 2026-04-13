@@ -1,0 +1,4 @@
+window,model_total_return,model_ann_return,model_ann_vol,model_sharpe,model_sortino,model_calmar,model_max_drawdown,model_hit_rate,model_n_periods,model_n_months,spy_total_return,spy_ann_return,spy_ann_vol,spy_sharpe,spy_sortino,spy_calmar,spy_max_drawdown,spy_hit_rate,spy_n_periods,spy_n_months
+IS,1106.82,14.01,16.45,0.589,0.567,0.38,-36.84,67.5,114,228,589.25,10.69,15.35,0.427,0.357,0.233,-45.96,72.8,114,228
+OOS,35.45,43.93,12.37,2.684,,55.963,-0.78,100.0,5,10,24.78,30.43,11.48,1.983,22.486,35.213,-0.86,100.0,5,10
+OOS_monthly,35.91,44.51,11.18,2.955,11.008,56.706,-0.78,90.0,10,10,24.78,30.43,7.8,2.851,8.36,35.213,-0.86,90.0,10,10

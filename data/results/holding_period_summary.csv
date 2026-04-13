@@ -1,4 +1,0 @@
-horizon,n_trading_days,ann_return,ann_vol,sharpe,max_drawdown,calmar,hit_rate,t_stat,n_periods
-1W,5,-18.64,35.87,-0.71,-19.01,-0.98,50.0,-0.44,30
-1M,21,16.15,31.13,0.327,-28.46,0.568,56.7,0.77,30
-3M,63,12.16,30.0,0.224,-38.32,0.317,56.7,1.06,30

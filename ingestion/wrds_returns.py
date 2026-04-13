@@ -144,9 +144,29 @@ def returns_wide(df: pd.DataFrame = None) -> pd.DataFrame:
     """
     Pivot to wide format: index=date, columns=permno, values=ret.
     Useful for cross-sectional factor calculations.
+
+    Normalises the date column to tz-naive month-end midnight before pivoting.
+    This eliminates timezone-related duplicates that arise when msf (legacy,
+    tz-naive) and msf_v2 (CIZ, sometimes returns tz-aware UTC timestamps) rows
+    are combined in the same parquet file.  Both "2026-01-31 00:00:00" and
+    "2026-01-31 05:00:00+00:00" collapse to "2026-01-31", keeping only the
+    last observation per (permno, date).
     """
     if df is None:
         df = load_returns()
+    df = df.copy()
+    # utc=True coerces mixed tz-naive / tz-aware to a uniform UTC series,
+    # then we strip the tz, normalise to midnight, and snap to month-end.
+    df["date"] = (
+        pd.to_datetime(df["date"], utc=True)
+        .dt.tz_localize(None)
+        .dt.normalize()
+        + pd.offsets.MonthEnd(0)
+    )
+    df = (
+        df.sort_values(["permno", "date"])
+        .drop_duplicates(subset=["permno", "date"], keep="last")
+    )
     return df.pivot(index="date", columns="permno", values="ret")
 
 

@@ -1,8 +1,0 @@
-signal,predictive_ic_1m,predictive_ic_12m,oos_predictive_ic,downside_ic,stability_score,is_selected
-unrate_yoy,0.2074,0.5451,-0.288,0.0345,0.1559,True
-indpro_yoy,-0.14,-0.5309,0.0319,-0.0406,0.1668,False
-icsa_yoy,0.1768,0.4849,0.1206,-0.0818,0.1908,False
-unrate_3m,0.0258,0.2652,0.3015,-0.0987,0.1428,False
-yield_curve,0.0387,-0.0123,0.3224,-0.2363,0.0996,False
-unrate_level,0.1489,0.3201,0.3787,-0.1498,0.1791,False
-hy_spread,0.2051,0.4738,0.6579,-0.0516,0.2094,False

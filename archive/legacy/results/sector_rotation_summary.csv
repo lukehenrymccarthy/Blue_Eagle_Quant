@@ -1,0 +1,4 @@
+label,ann_return,ann_vol,sharpe,sortino,max_drawdown,calmar,hit_rate,t_stat,n_months
+Sector Rotation,16.19,7.67,1.354,3.542,-0.24,67.976,75.0,1.99,12
+EW All Sectors,18.08,7.58,1.591,2.884,-0.86,20.929,75.0,2.24,12
+SPY,20.66,16.67,0.859,1.141,-5.05,4.092,75.0,1.15,12
