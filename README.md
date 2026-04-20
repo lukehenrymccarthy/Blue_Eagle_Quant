@@ -11,10 +11,6 @@ Every two months the model:
 2. Picks the 10 highest-scoring stocks
 3. Holds them equally weighted until the next rebalance
 
-**Backtest results (2005–2024):** 14% annualised return vs 10.7% for SPY, with a lower max drawdown (-37% vs -46%).
-
-**Live results (Apr 2025–Mar 2026):** 23.8% total return vs 18.6% for SPY.
-
 ---
 
 ## Quickstart — See the Current Portfolio and Results

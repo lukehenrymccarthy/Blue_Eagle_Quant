@@ -65,14 +65,13 @@ def sic_to_etf(sic) -> str | None:
     if (1700 <= sic <= 1799 or                           # Construction / trade
             3400 <= sic <= 3569 or 3580 <= sic <= 3599 or
             3710 <= sic <= 3719 or 3720 <= sic <= 3743 or
-            3560 <= sic <= 3579 or
             3812 <= sic <= 3812 or
             3820 <= sic <= 3830 or                       # Measuring instruments
             4011 <= sic <= 4013 or
             4210 <= sic <= 4215 or 4510 <= sic <= 4522 or
             4700 <= sic <= 4799 or                       # Transportation services
             7510 <= sic <= 7515 or
-            7380 <= sic <= 7389 or                       # Misc business services
+            7380 <= sic <= 7388 or                       # Misc business services (excl 7389 payment/data processing)
             8700 <= sic <= 8742):                        # Engineering / mgmt consulting
         return "XLI"
     # Technology
@@ -82,7 +81,7 @@ def sic_to_etf(sic) -> str | None:
             3823 <= sic <= 3829 or                       # Industrial instruments
             3841 <= sic <= 3841 or                       # Surgical instruments (border XLV/XLK)
             5040 <= sic <= 5049 or                       # Professional equip wholesale
-            7370 <= sic <= 7379 or                       # Computer services
+            7370 <= sic <= 7389 or                       # Computer & data processing services (incl payment processors)
             8731 <= sic <= 8734):                        # Commercial R&D labs
         return "XLK"
     # Comm. Services

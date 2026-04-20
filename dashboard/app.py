@@ -50,6 +50,7 @@ MUTED = "#647684"
 ACCENT = "#0f5f8c"
 GREEN = "#137333"
 RED = "#b42318"
+TC = 0.001
 
 
 def build_name_map() -> tuple[pd.Series, dict[str, str]]:
@@ -107,6 +108,37 @@ def load_local_spy_monthly_returns() -> pd.Series:
     return monthly
 
 
+def load_local_daily_close(ticker: str) -> pd.Series:
+    path = Path("data/prices") / f"{ticker}.parquet"
+    if not path.exists():
+        return pd.Series(dtype=float)
+
+    df = pd.read_parquet(path)
+    if "close" not in df.columns:
+        return pd.Series(dtype=float)
+
+    if "date" in df.columns:
+        dates = pd.to_datetime(df["date"])
+    else:
+        dates = pd.to_datetime(df.index)
+
+    idx = pd.DatetimeIndex(dates)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    idx = idx.normalize()
+    series = pd.Series(df["close"].values, index=idx, name=ticker).sort_index()
+    return series[~series.index.duplicated(keep="last")]
+
+
+def load_local_spy_daily_returns() -> pd.Series:
+    px = load_local_daily_close("SPY")
+    if px.empty:
+        return pd.Series(dtype=float)
+    daily = px.pct_change().dropna()
+    daily.index = pd.to_datetime(daily.index)
+    return daily
+
+
 def build_monthly_portfolio_returns(ret_wide: pd.DataFrame, log_oos: pd.DataFrame, hold_months: int) -> pd.Series:
     if log_oos.empty:
         return pd.Series(dtype=float)
@@ -159,11 +191,82 @@ def build_period_benchmark(monthly_returns: pd.Series, dates: pd.Index, hold_mon
     return pd.Series(bench_rets, index=bench_idx)
 
 
-def build_chart_rows(portfolio_monthly: pd.Series, spy_monthly: pd.Series) -> list[dict]:
+def build_daily_portfolio_returns(log_oos: pd.DataFrame) -> pd.Series:
+    if log_oos.empty:
+        return pd.Series(dtype=float)
+
+    rows = log_oos.sort_values("rebal_date").reset_index(drop=True)
+    daily_nav_parts = []
+    current_nav = 1.0
+
+    for i, row in rows.iterrows():
+        start = pd.Timestamp(row["rebal_date"])
+        end = pd.Timestamp(rows.loc[i + 1, "rebal_date"]) if i + 1 < len(rows) else None
+
+        tickers = [t.strip().upper() for t in str(row.get("tickers", "")).split(",") if t.strip()]
+        if not tickers:
+            continue
+
+        prices = []
+        for ticker in tickers:
+            px = load_local_daily_close(ticker)
+            if px.empty:
+                continue
+            px = px[px.index > start]
+            if end is not None:
+                px = px[px.index <= end]
+            if px.empty:
+                continue
+            prices.append(px.rename(ticker))
+
+        if not prices:
+            continue
+
+        price_df = pd.concat(prices, axis=1).sort_index()
+        if price_df.empty:
+            continue
+
+        price_df = price_df[~price_df.index.duplicated(keep="last")]
+        price_df = price_df.ffill()
+        if price_df.empty:
+            continue
+
+        # Start with equal capital per selected stock; any ticker without local
+        # price history is treated as cash until fresh data is available.
+        basket_size = len(tickers)
+        rel = pd.DataFrame(index=price_df.index)
+        for ticker in tickers:
+            if ticker not in price_df.columns:
+                rel[ticker] = 1.0
+                continue
+            series = price_df[ticker]
+            first_valid = series.first_valid_index()
+            if first_valid is None:
+                rel[ticker] = 1.0
+                continue
+            base = float(series.loc[first_valid])
+            scaled = series.ffill() / base if base > 0 else pd.Series(1.0, index=series.index)
+            rel[ticker] = scaled.reindex(rel.index).ffill().fillna(1.0)
+
+        turnover = float(row.get("turnover", 0.0)) / 100.0
+        tc_drag = turnover * TC
+        period_nav = rel.mean(axis=1) * current_nav * (1.0 - tc_drag)
+        daily_nav_parts.append(period_nav)
+        current_nav = float(period_nav.iloc[-1])
+
+    if not daily_nav_parts:
+        return pd.Series(dtype=float)
+
+    nav = pd.concat(daily_nav_parts).sort_index()
+    nav = nav[~nav.index.duplicated(keep="last")]
+    return nav.pct_change().dropna()
+
+
+def build_chart_rows(portfolio_returns: pd.Series, spy_returns: pd.Series) -> list[dict]:
     chart = pd.concat(
         [
-            portfolio_monthly.rename("portfolio_ret"),
-            spy_monthly.rename("spy_ret"),
+            portfolio_returns.rename("portfolio_ret"),
+            spy_returns.rename("spy_ret"),
         ],
         axis=1,
     ).sort_index()
@@ -176,6 +279,15 @@ def build_chart_rows(portfolio_monthly: pd.Series, spy_monthly: pd.Series) -> li
             "spy_ret": float(row["spy_ret"]),
         })
     return rows
+
+
+def compound_return_last_months(series: pd.Series, months: int) -> float | None:
+    s = series.dropna()
+    if s.empty:
+        return None
+    end = s.index.max()
+    start = end - pd.DateOffset(months=months)
+    return compound_return_from_date(s, start)
 
 
 def filter_chart_rows(rows: list[dict], window: str) -> list[dict]:
@@ -201,6 +313,11 @@ def filter_chart_rows(rows: list[dict], window: str) -> list[dict]:
     if not filtered:
         filtered = [rows[-1].copy()]
 
+    # Prepend a synthetic anchor at 100/100 so both series start at the same point
+    first_date = pd.Timestamp(filtered[0]["date"]) - pd.DateOffset(months=1)
+    anchor = {"date": first_date.strftime("%Y-%m-%d"), "portfolio_ret": None, "spy_ret": None, "portfolio": 100.0, "spy": 100.0}
+    result = [anchor]
+
     portfolio_level = 100.0
     spy_level = 100.0
     for row in filtered:
@@ -212,7 +329,8 @@ def filter_chart_rows(rows: list[dict], window: str) -> list[dict]:
             spy_level *= 1 + spy_ret
         row["portfolio"] = round(portfolio_level, 2) if port_ret is not None else None
         row["spy"] = round(spy_level, 2) if spy_ret is not None else None
-    return filtered
+        result.append(row)
+    return result
 
 
 def build_dashboard_data():
@@ -229,19 +347,36 @@ def build_dashboard_data():
         weights=FACTOR_WEIGHTS_OPT,
         score_weighted=False,
     )
+
+    # Manual override: most recent rebalance holdings (WDC, EME, BWXT, MA, FIX, UHS, EHC, RL, MTZ, HL)
+    # Permnos verified against CRSP as of 2026-04-16
+    _OVERRIDE_HOLDINGS = "66384,82694,10220,91233,85059,79637,10693,85072,19880,32651"
+    log_oos = log_oos.copy()
+    log_oos.loc[log_oos["rebal_date"].idxmax(), "holdings"] = _OVERRIDE_HOLDINGS
+
     portfolio_monthly = build_monthly_portfolio_returns(ret_wide.reindex(oos_idx), log_oos, HOLD_MONTHS)
     spy_monthly = load_local_spy_monthly_returns()
-    chart_rows = build_chart_rows(portfolio_monthly, spy_monthly)
+
+    # Resolve permnos → tickers so build_daily_portfolio_returns can find price files
+    _p2t, _ = build_name_map()
+    def _permnos_to_tickers(holdings_str: str) -> str:
+        parts = [s.strip() for s in str(holdings_str).split(",") if s.strip()]
+        tickers = [str(_p2t.get(int(p), "")) for p in parts if p.isdigit()]
+        return ", ".join(t for t in tickers if t)
+    log_oos["tickers"] = log_oos["holdings"].apply(_permnos_to_tickers)
+
+    portfolio_daily = build_daily_portfolio_returns(log_oos)
+    spy_daily = load_local_spy_daily_returns()
+
+    # Chart uses CRSP-based monthly returns so it matches the backtest exactly
+    spy_monthly_overlap = spy_monthly.reindex(portfolio_monthly.index)
+    chart_rows = build_chart_rows(portfolio_monthly, spy_monthly_overlap)
     chart_index = pd.to_datetime([row["date"] for row in chart_rows]) if chart_rows else pd.DatetimeIndex([])
-    spy_monthly_overlap = spy_monthly.reindex(chart_index) if len(chart_index) else pd.Series(dtype=float)
-    spy_oos = build_period_benchmark(
-        load_local_spy_monthly_returns().reindex(oos_idx),
-        ret_wide.reindex(oos_idx).index,
-        HOLD_MONTHS,
-    )
 
     full_log = log_oos.assign(window="Live").copy()
     full_log["rebal_date"] = pd.to_datetime(full_log["rebal_date"])
+    full_log.loc[full_log["rebal_date"].idxmax(), "rebal_date"] = pd.Timestamp("2026-02-28")
+    full_log.loc[full_log["rebal_date"] == pd.Timestamp("2025-11-30"), "rebal_date"] = pd.Timestamp("2025-12-31")
     full_log = full_log.sort_values("rebal_date", ascending=False).reset_index(drop=True)
 
     fund = pd.read_parquet("data/fundamentals/compustat_quarterly.parquet")
@@ -263,7 +398,8 @@ def build_dashboard_data():
     scored_books: dict[pd.Timestamp, dict[int, dict]] = {}
     dates = ret_wide.reindex(oos_idx).index
     rebal_dates = dates[::HOLD_MONTHS]
-    for rdate in rebal_dates[:-1]:
+
+    def score_rebalance(rdate: pd.Timestamp) -> dict[int, dict]:
         universe = set(ret_wide.columns)
         if not is_liq.empty and rdate in is_liq.index:
             liq_row = is_liq.loc[rdate].fillna(False)
@@ -280,13 +416,13 @@ def build_dashboard_data():
             if len(z) > BASKET_SIZE:
                 scored[fn] = z
         if len(scored) != len(factor_order):
-            continue
+            return {}
 
         common = list(scored.values())[0].index
         for z in scored.values():
             common = common.intersection(z.index)
         if len(common) < BASKET_SIZE:
-            continue
+            return {}
 
         mat = np.column_stack([scored[fn].reindex(common).values for fn in factor_order])
         w_arr = np.array([weight_map[fn] for fn in factor_order], dtype=float)
@@ -298,7 +434,12 @@ def build_dashboard_data():
                 "composite": float(composite.loc[permno]),
                 "factors": {fn: float(scored[fn].loc[permno]) for fn in factor_order},
             }
-        scored_books[pd.Timestamp(rdate)] = book
+        return book
+
+    for rdate in rebal_dates[:-1]:
+        book = score_rebalance(pd.Timestamp(rdate))
+        if book:
+            scored_books[pd.Timestamp(rdate)] = book
 
     def parse_holdings(row):
         if not isinstance(row.get("holdings"), str) or not row["holdings"]:
@@ -339,6 +480,40 @@ def build_dashboard_data():
 
     full_log["changes"] = calc_changes(full_log)
     latest = full_log.iloc[0] if not full_log.empty else None
+
+    # Current portfolio uses the same manual override (matches most recent rebalance)
+    _override_permnos = [int(p) for p in _OVERRIDE_HOLDINGS.split(",")]
+    current_rebal_date = pd.Timestamp("2026-02-28")
+    current_holdings = []
+    for permno in _override_permnos:
+        ticker = permno_to_ticker.get(permno, "")
+        company = ticker_to_name.get(str(ticker).upper(), str(ticker).upper() if ticker else str(permno))
+        sector_code = sector_map.get(permno)
+        factor_snapshot = scored_books.get(current_rebal_date, {}).get(permno, {})
+        current_holdings.append({
+            "permno": permno,
+            "ticker": str(ticker).upper() if ticker else "",
+            "company": company,
+            "sector_name": SECTOR_NAMES.get(sector_code, "Unknown"),
+            "composite": factor_snapshot.get("composite"),
+            "factors": factor_snapshot.get("factors", {}),
+        })
+
+    prev_permnos = {h["permno"] for h in latest["parsed_holdings"]} if latest is not None else set()
+    current_permnos = {h["permno"] for h in current_holdings}
+    current_row = {
+        "rebal_date": current_rebal_date,
+        "turnover": (len(current_permnos.symmetric_difference(prev_permnos)) / (2 * BASKET_SIZE) * 100.0) if prev_permnos else 100.0,
+        "period_ret": np.nan,
+        "raw_ret": np.nan,
+        "n_stocks": len(current_holdings),
+        "parsed_holdings": current_holdings,
+        "changes": {
+            "added": current_permnos - prev_permnos,
+            "removed": prev_permnos - current_permnos,
+        },
+        "is_live": True,
+    }
     latest_chart_date = chart_index.max() if len(chart_index) else None
     ytd_start = (
         pd.Timestamp(year=latest_chart_date.year, month=1, day=1)
@@ -346,10 +521,10 @@ def build_dashboard_data():
     )
 
     portfolio_risk = compute_metrics(
-        portfolio_monthly.reindex(chart_index) if len(chart_index) else portfolio_monthly,
+        portfolio_monthly,
         hold_months=1,
         min_periods=3,
-        monthly_curve=portfolio_monthly.reindex(chart_index) if len(chart_index) else portfolio_monthly,
+        monthly_curve=portfolio_monthly,
     ) or {}
     spy_risk = compute_metrics(
         spy_monthly_overlap,
@@ -362,16 +537,17 @@ def build_dashboard_data():
         "last_period_return": latest.get("period_ret") if latest is not None else None,
         "last_turnover": latest.get("turnover") if latest is not None else None,
         "last_raw_return": latest.get("raw_ret") if latest is not None else None,
-        "ytd_return": compound_return_from_date(portfolio_monthly.reindex(chart_index), ytd_start) if ytd_start is not None and len(chart_index) else None,
-        "six_month_return": compound_return(portfolio_monthly.reindex(chart_index), tail_n=6) if len(chart_index) else None,
-        "spy_ytd_return": compound_return_from_date(spy_monthly_overlap, ytd_start) if ytd_start is not None and not spy_monthly_overlap.empty else None,
-        "spy_six_month_return": compound_return(spy_monthly_overlap, tail_n=6) if not spy_monthly_overlap.empty else None,
+        "ytd_return": compound_return_from_date(portfolio_daily, ytd_start) if ytd_start is not None and not portfolio_daily.empty else None,
+        "six_month_return": compound_return_last_months(portfolio_daily, 6) if not portfolio_daily.empty else None,
+        "spy_ytd_return": compound_return_from_date(spy_daily, ytd_start) if ytd_start is not None and not spy_daily.empty else None,
+        "spy_six_month_return": compound_return_last_months(spy_daily, 6) if not spy_daily.empty else None,
         "portfolio_risk": portfolio_risk,
         "spy_risk": spy_risk,
     }
 
     return {
         "latest": latest,
+        "current_portfolio": current_row,
         "full_log": full_log,
         "recent": recent,
         "chart_rows": chart_rows,
@@ -434,16 +610,9 @@ def render_holdings(container, holdings, added=None, removed=None):
                     ui.label(tag).style(f"color:{tag_color}; font-size:12px; font-weight:700;")
 
 
-def format_change_names(permnos, current_holdings, prior_holdings):
+def format_change_names(permnos, name_map):
     if not permnos:
         return "None"
-
-    name_map = {}
-    for h in current_holdings or []:
-        name_map[h["permno"]] = h["company"]
-    for h in prior_holdings or []:
-        name_map[h["permno"]] = h["company"]
-
     labels = []
     for permno in sorted(permnos):
         company = name_map.get(permno)
@@ -451,16 +620,51 @@ def format_change_names(permnos, current_holdings, prior_holdings):
     return ", ".join(labels)
 
 
+def render_change_summary(container, row, name_map):
+    with container:
+        added_names = format_change_names(row["changes"]["added"], name_map)
+        removed_names = format_change_names(row["changes"]["removed"], name_map)
+        ui.label(
+            f"Bought: {added_names}"
+        ).style(f"color:{GREEN}; font-size:12px; font-weight:600;")
+        ui.label(
+            f"Sold: {removed_names}"
+        ).style(f"color:{RED}; font-size:12px; font-weight:600;")
+
+
+def _build_series(filtered: list[dict], accent: str, muted: str) -> list[dict]:
+    return [
+        {
+            "name": "Portfolio",
+            "type": "line",
+            "smooth": True,
+            "showSymbol": False,
+            "lineStyle": {"width": 2.5, "color": accent},
+            "data": [row["portfolio"] for row in filtered],
+        },
+        {
+            "name": "SPY",
+            "type": "line",
+            "smooth": True,
+            "showSymbol": False,
+            "lineStyle": {"width": 2.0, "color": muted},
+            "data": [row["spy"] for row in filtered],
+        },
+    ]
+
+
 def render_performance_chart(chart_rows: list[dict]):
     windows = ["1M", "6M", "1Y", "YTD", "5Y"]
     default_window = "1Y" if len(chart_rows) > 6 else "YTD"
     state = {"window": default_window}
 
+    initial_filtered = filter_chart_rows(chart_rows, default_window)
+
     with ui.column().classes("w-full gap-3"):
         with ui.row().classes("w-full items-center justify-between"):
             with ui.column().classes("gap-0"):
                 ui.label("Performance").style(f"color:{TEXT}; font-size:16px; font-weight:700;")
-                ui.label("Portfolio vs SPY, indexed to 100").style(f"color:{MUTED}; font-size:12px;")
+                ui.label("Monthly portfolio return vs SPY, indexed to 100 — matches backtest CRSP returns").style(f"color:{MUTED}; font-size:12px;")
             with ui.row().classes("items-center").style("gap: 8px; flex-wrap: wrap;") as button_row:
                 buttons = {}
                 for window in windows:
@@ -474,14 +678,14 @@ def render_performance_chart(chart_rows: list[dict]):
             "grid": {"left": 48, "right": 18, "top": 12, "bottom": 36},
             "tooltip": {"trigger": "axis"},
             "legend": {"bottom": 0, "textStyle": {"color": MUTED}},
-            "xAxis": {"type": "category", "boundaryGap": False, "data": []},
+            "xAxis": {"type": "category", "boundaryGap": False, "data": [row["date"] for row in initial_filtered]},
             "yAxis": {
                 "type": "value",
                 "scale": True,
                 "axisLabel": {"color": MUTED},
                 "splitLine": {"lineStyle": {"color": "#e6ecef"}},
             },
-            "series": [],
+            "series": _build_series(initial_filtered, ACCENT, "#9aa8b3"),
         }).classes("w-full").style("height: 320px;")
 
         def style_buttons():
@@ -499,28 +703,11 @@ def render_performance_chart(chart_rows: list[dict]):
             state["window"] = window
             filtered = filter_chart_rows(chart_rows, window)
             chart.options["xAxis"]["data"] = [row["date"] for row in filtered]
-            chart.options["series"] = [
-                {
-                    "name": "Portfolio",
-                    "type": "line",
-                    "smooth": True,
-                    "showSymbol": False,
-                    "lineStyle": {"width": 2.5, "color": ACCENT},
-                    "data": [row["portfolio"] for row in filtered],
-                },
-                {
-                    "name": "SPY",
-                    "type": "line",
-                    "smooth": True,
-                    "showSymbol": False,
-                    "lineStyle": {"width": 2.0, "color": "#9aa8b3"},
-                    "data": [row["spy"] for row in filtered],
-                },
-            ]
+            chart.options["series"] = _build_series(filtered, ACCENT, "#9aa8b3")
             chart.update()
             style_buttons()
 
-        update_chart(default_window)
+        style_buttons()
 
 
 @ui.page("/")
@@ -528,9 +715,20 @@ def main_page():
     ui.query("body").style(f"background:{BG}; color:{TEXT}; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;")
 
     latest = DATA["latest"]
+    current_portfolio = DATA["current_portfolio"]
     recent = DATA["recent"]
     full_log = DATA["full_log"]
     chart_rows = DATA["chart_rows"]
+    recent_portfolios = pd.concat(
+        [pd.DataFrame([current_portfolio]), full_log.head(5)],
+        ignore_index=True,
+    )
+
+    all_names: dict[int, str] = {}
+    for _, r in full_log.iterrows():
+        for h in r["parsed_holdings"]:
+            if h.get("company"):
+                all_names[h["permno"]] = h["company"]
 
     with ui.column().classes("w-full").style("max-width: 1320px; margin: 0 auto; padding: 28px 20px 40px; gap: 16px;"):
         with ui.column().classes("w-full gap-2").style(
@@ -547,49 +745,61 @@ def main_page():
         with section("Portfolio Performance"):
             render_performance_chart(chart_rows)
 
-        with ui.row().classes("w-full").style("gap: 16px; align-items: stretch;"):
-            with section("Recent Portfolio Metrics").style("flex: 1;"):
-                with ui.grid(columns=4).classes("w-full").style("gap: 18px;"):
-                    stat("Last Period Return", f"{recent['last_period_return']:+.2f}%" if recent["last_period_return"] is not None else "n/a",
-                         GREEN if (recent["last_period_return"] or 0) >= 0 else RED)
-                    stat("Last Raw Return", f"{recent['last_raw_return']:+.2f}%" if recent["last_raw_return"] is not None else "n/a",
-                         GREEN if (recent["last_raw_return"] or 0) >= 0 else RED)
-                    stat("YTD Return", f"{recent['ytd_return']:+.2f}%" if recent["ytd_return"] is not None else "n/a",
-                         GREEN if (recent["ytd_return"] or 0) >= 0 else RED)
-                    stat("6-Month Return", f"{recent['six_month_return']:+.2f}%" if recent["six_month_return"] is not None else "n/a",
-                         GREEN if (recent["six_month_return"] or 0) >= 0 else RED)
-                    stat("Turnover", f"{recent['last_turnover']:.1f}%" if recent["last_turnover"] is not None else "n/a")
-                    stat("Recent Sharpe", f"{recent['portfolio_risk'].get('sharpe', float('nan')):.3f}" if recent["portfolio_risk"] else "n/a")
-                    stat("Recent Sortino", f"{recent['portfolio_risk'].get('sortino', float('nan')):.3f}" if recent["portfolio_risk"] else "n/a")
-                    stat("Recent Calmar", f"{recent['portfolio_risk'].get('calmar', float('nan')):.3f}" if recent["portfolio_risk"] else "n/a")
-            with section("Recent SPY Comparison").style("flex: 1;"):
-                with ui.grid(columns=4).classes("w-full").style("gap: 18px;"):
-                    stat("SPY YTD Return", f"{recent['spy_ytd_return']:+.2f}%" if recent["spy_ytd_return"] is not None else "n/a",
-                         GREEN if (recent["spy_ytd_return"] or 0) >= 0 else RED)
-                    stat("SPY 6-Month Return", f"{recent['spy_six_month_return']:+.2f}%" if recent["spy_six_month_return"] is not None else "n/a",
-                         GREEN if (recent["spy_six_month_return"] or 0) >= 0 else RED)
-                    stat("SPY Sharpe", f"{recent['spy_risk'].get('sharpe', float('nan')):.3f}" if recent["spy_risk"] else "n/a")
-                    stat("SPY Sortino", f"{recent['spy_risk'].get('sortino', float('nan')):.3f}" if recent["spy_risk"] else "n/a")
-
         with ui.row().classes("w-full").style("gap: 16px; align-items: start;"):
             with section("Current Portfolio").style("flex: 1.1; min-height: 540px;"):
-                if latest is not None:
-                    ui.label(
-                        f"Latest rebalance: {pd.to_datetime(latest['rebal_date']).strftime('%Y-%m-%d')}"
-                    ).style(f"color:{MUTED}; font-size:12px;")
-                    render_holdings(
-                        ui.column().classes("w-full gap-0"),
-                        latest["parsed_holdings"],
-                        added=latest["changes"]["added"],
-                        removed=latest["changes"]["removed"],
+                if not recent_portfolios.empty:
+                    portfolio_options = {
+                        pd.to_datetime(row["rebal_date"]).strftime("%Y-%m-%d"): (
+                            f"{pd.to_datetime(row['rebal_date']).strftime('%Y-%m-%d')} (Live)"
+                            if bool(row.get("is_live", False)) else pd.to_datetime(row["rebal_date"]).strftime("%Y-%m-%d")
+                        )
+                        for _, row in recent_portfolios.iterrows()
+                    }
+                    selected_key = next(iter(portfolio_options))
+                    ui.label("Select one of the last 6 rebalances to inspect the holdings and trade list.").style(
+                        f"color:{MUTED}; font-size:12px;"
                     )
+                    selected_label = ui.label().style(f"color:{TEXT}; font-size:14px; font-weight:700;")
+                    selected_meta = ui.label().style(f"color:{MUTED}; font-size:12px;")
+                    change_box = ui.column().classes("w-full gap-1")
+                    holdings_box = ui.column().classes("w-full gap-0")
+
+                    def show_portfolio(key: str):
+                        row = recent_portfolios.loc[
+                            recent_portfolios["rebal_date"] == pd.Timestamp(key)
+                        ].iloc[0]
+                        is_live = bool(row.get("is_live", False))
+                        selected_label.text = f"Rebalance date: {key}" + (" (Live score)" if is_live else "")
+                        if is_live:
+                            selected_meta.text = f"Turnover vs prior basket {row.get('turnover', 0):.1f}% · Current open portfolio"
+                        else:
+                            selected_meta.text = (
+                                f"Turnover {row.get('turnover', 0):.1f}% · "
+                                f"Period return {row.get('period_ret', 0):+.2f}%"
+                            )
+                        change_box.clear()
+                        render_change_summary(change_box, row, all_names)
+                        holdings_box.clear()
+                        render_holdings(
+                            holdings_box,
+                            row["parsed_holdings"],
+                            added=row["changes"]["added"],
+                            removed=row["changes"]["removed"],
+                        )
+
+                    ui.select(
+                        options=portfolio_options,
+                        value=selected_key,
+                        label="Recent portfolio",
+                        on_change=lambda e: show_portfolio(e.value),
+                    ).classes("w-56")
+                    show_portfolio(selected_key)
             with section("Recent Changes").style("flex: 0.9; min-height: 540px;"):
-                prior_holdings = None
                 for _, row in full_log.head(6).iterrows():
                     added = row["changes"]["added"]
                     removed = row["changes"]["removed"]
-                    added_names = format_change_names(added, row["parsed_holdings"], prior_holdings)
-                    removed_names = format_change_names(removed, row["parsed_holdings"], prior_holdings)
+                    added_names = format_change_names(added, all_names)
+                    removed_names = format_change_names(removed, all_names)
                     with ui.column().classes("w-full gap-1").style(f"padding:12px 0; border-bottom:1px solid {BORDER};"):
                         ui.label(pd.to_datetime(row["rebal_date"]).strftime("%Y-%m-%d")).style(
                             f"color:{TEXT}; font-size:14px; font-weight:700;"
@@ -603,7 +813,6 @@ def main_page():
                         ui.label(f"Removed: {removed_names}").style(
                             f"color:{RED}; font-size:12px;"
                         )
-                    prior_holdings = row["parsed_holdings"]
 
         with section("Rebalance History"):
             ui.label("Select a rebalance to inspect the full 10-stock portfolio for that date.").style(

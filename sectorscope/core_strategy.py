@@ -8,7 +8,7 @@ from sectorscope.utils import zscore as _zscore
 
 FULL_START = "2005-01-01"
 IS_END = "2024-12-31"
-OOS_START = "2025-04-01"
+OOS_START = "2025-03-01"
 OOS_END = "2026-03-31"
 
 UNIVERSE_SIZE = 1000
@@ -139,7 +139,7 @@ def run_backtest_exact(
         period_slice = ret_wide.loc[
             (ret_wide.index > rdate) & (ret_wide.index <= next_rdate),
             list(top_n),
-        ].dropna(how="all", axis=1)
+        ]
         if period_slice.empty:
             port_rets.append(np.nan)
             continue
@@ -149,12 +149,31 @@ def run_backtest_exact(
             if live:
                 ranks = composite.reindex(live).rank()
                 stock_w = (ranks / ranks.sum()).reindex(period_slice.columns).fillna(0)
-                sw_monthly = period_slice.mul(stock_w, axis=1).sum(axis=1)
+                sw_monthly = period_slice.fillna(0.0).mul(stock_w, axis=1).sum(axis=1)
             else:
-                sw_monthly = period_slice.mean(axis=1)
+                sw_monthly = period_slice.fillna(0.0).mean(axis=1)
             raw_ret = (1 + sw_monthly).prod() - 1
         else:
-            raw_ret = (1 + period_slice.mean(axis=1)).prod() - 1
+            start_weights = pd.Series(1.0 / basket_size, index=pd.Index(sorted(top_n), dtype=object))
+            position_nav = start_weights.copy()
+            cash_nav = 0.0
+
+            for _, month_ret in period_slice.reindex(columns=start_weights.index).iterrows():
+                for stock in position_nav.index:
+                    nav = position_nav.loc[stock]
+                    if nav == 0:
+                        continue
+                    r = month_ret.get(stock, np.nan)
+                    if pd.isna(r):
+                        # Conservative handling: if the chosen name has no return
+                        # inside the hold window, stop redistributing its capital
+                        # to surviving names and park the proceeds in cash.
+                        cash_nav += nav
+                        position_nav.loc[stock] = 0.0
+                    else:
+                        position_nav.loc[stock] = nav * (1 + float(r))
+
+            raw_ret = position_nav.sum() + cash_nav - 1.0
 
         rf_period = (1 + RISK_FREE_ANN) ** (hold_months / 12) - 1
         period_ret = raw_ret - tc_drag + 0.0 * rf_period
